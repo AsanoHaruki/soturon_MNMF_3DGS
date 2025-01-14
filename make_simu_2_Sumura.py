@@ -206,7 +206,7 @@ def convolve_RIR(signal_NT):
     return mixture_signal_MT
 
 mixture_signal_MT = convolve_RIR(wav_NT)
-output_path = "/home/yoshiilab1/soturon/mnmf/code/MNMF_20241218/self_data_2/mixture_time_domain_2_corner.wav"
+output_path = "/home/yoshiilab1/soturon/mnmf/code/self_data/mixture_time_domain_2_corner.wav"
 output_dir = os.path.dirname(output_path)
 if not os.path.exists(output_dir):
     os.makedirs(output_dir)

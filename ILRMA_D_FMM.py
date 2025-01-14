@@ -50,10 +50,10 @@ class ILRMA:
             n_basis: int
                 NMFの基底数
         """
-        data_root = Path("/home/yoshiilab1/soturon/mnmf/code/MNMF_20241218/self_data_2")
+        data_root = Path("/home/yoshiilab1/soturon/mnmf/code/self_data")
         save_root = Path("result_a_source_Smuramodel")
         save_root.mkdir(exist_ok=True)
-        data_file = data_root / "mixture_time_domain_2.wav"
+        data_file = data_root / "mixture_time_domain_2_corner.wav"
         # data, samplerate = sf.read(data_file)
         data, samplerate = sf.read(data_file)
         data = data - data.mean()

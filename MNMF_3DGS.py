@@ -5,6 +5,7 @@ import soundfile as sf
 import matplotlib.pyplot as plt
 import pickle as pic
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 import plot_fig
 import matplotlib.animation as animation
 import mir_eval
@@ -80,9 +81,9 @@ class STFT:
         return tmp / tmp.abs().max()
     
 today = datetime.datetime.now()
-timestamp = today.strftime('%Y%m%d_%H%M%S')
-data_root = Path("/home/yoshiilab1/soturon/mnmf/code/MNMF_20241218/self_data_2")
-save_root = Path("result_2_source_Sumuramodel")
+timestamp = today.strftime('%Y%m%d_%H%M')
+data_root = Path("self_data")
+save_root = Path(f"result/{timestamp}")
 save_root.mkdir(exist_ok=True)
 data_file = data_root / "mixture_time_domain_2_corner.wav"
 data, samplerate = sf.read(data_file)
@@ -115,7 +116,7 @@ def create_gif():
         return scat,
     anim = animation.FuncAnimation(
         fig, gifupdate, frames=mnmf.gif_positions, blit=True)
-    gif_filename = save_root / f"{timestamp}_R_N_optimization lr_l=1e-4, lr_r=1e-3, n_wh_update=50, n_g_update=4 ,n_R_update=30, gif_frames=50, alpha=1e-7.gif"
+    gif_filename = save_root / f"R_N_optimization.gif"
     try:
         anim.save(gif_filename, writer="imagemagick", fps=2)
         print(f"GIF saved at {gif_filename}")
@@ -174,7 +175,7 @@ class MNMF:
     def initialize(self):
         self.initialize_R(init_loc=SOUND_POSITIONS)
         self.initialize_WH()
-        self.initialize_G()
+        self.initialize_G(init_mode='ILRMA')
         # self.normalize_WHG()
         self.normalize_WH()
         self.read_ply_to_tensor()
@@ -285,7 +286,7 @@ class MNMF:
         # print(f"lambda.shape : {self.lambda_NFT.shape}") #? (2,513,231)だった。想定通りのshape。確認するのはGかな？
 
     # 空間共分散行列Gを須村論文式(6)のように初期化。(mnmfの初期化方法)
-    def initialize_G(self):
+    def initialize_G_beta(self):
         eps = 1e-5
         G_size = [self.n_source, self.n_freq, self.n_mic, self.n_mic]
         G_NFMM = torch.zeros(G_size, dtype=torch.complex128)
@@ -295,23 +296,34 @@ class MNMF:
         ilrma.initialize()
         for _ in range(70):
             ilrma.update()
-        ilrma.separate()
+        ilrma.separate(mic_index=0)
         print("ILRMA finished")
         # a_FMMは混合行列print(f"R_N.shape : {self.gpu_R_N.shape}")
         # 分離行列の逆行列を計算することで混合行列を得る。
-        a_FNM = torch.linalg.inv(ilrma.D_FMM)
+        a_FNM = torch.linalg.pinv(ilrma.D_FMM)
         # print(f"a_FNM.shape : {a_FNM.shape}")
         separated_spec_power = torch.abs(ilrma.Z_FTN_ILRMA).mean(axis=(0, 1))
+        
+        for n in range(self.n_source):
+            # a_FNMを使ってG_NFMMを計算
+            G_NFMM[n, :, :, :] = torch.einsum('fm,fl->fml', 
+                                            a_FNM[:, :, separated_spec_power.argmax()], 
+                                            a_FNM[:, :, separated_spec_power.argmax()].conj())
+            # 最もパワーが大きい成分を除外して次に進む
+            separated_spec_power[separated_spec_power.argmax()] = 0
+        
         #? 一旦これじゃないやり方でやってみる
-        max_index = torch.argsort(separated_spec_power, descending=True)[:2]
-        G_NFMM = torch.einsum('fmn,fln->nfml',a_FNM,a_FNM.conj())
-        G_NFMM = G_NFMM[max_index]
+        # max_index = torch.argsort(separated_spec_power, descending=True)[:2]
+        # G_NFMM = torch.einsum('fmn,fln->nfml',a_FNM,a_FNM.conj())
+        # G_NFMM = G_NFMM[max_index]
+        
         # for n in range(self.n_source):
         #         G_NFMM[n, :, :, :] = torch.einsum('fm,fl->fml', 
         #                             a_FNM[:, :, separated_spec_power.argmax()], 
         #                             a_FNM[:, :, separated_spec_power.argmax()].conj())
         #         # ↓すでに処理した音源を次回のループで再度選ばれないようにするために0にしておく
         #         separated_spec_power[separated_spec_power.argmax()] = 0
+        
         G_NFMM = (G_NFMM + G_NFMM.conj().transpose(-2, -1)) / 2
         G_NFMM = G_NFMM + eps * torch.eye(G_NFMM.shape[-1], dtype=torch.complex128, device=device)  # エルミート化
         del ilrma
@@ -319,6 +331,71 @@ class MNMF:
         self.gpu_L_NFMM = torch.linalg.cholesky(G_NFMM)
         self.gpu_L_NFMM = torch.log(self.gpu_L_NFMM).detach()
         self.gpu_L_NFMM.requires_grad_(True)
+        
+    def initialize_G(self, init_mode='ILRMA'):
+        eps = 1e-5
+        G_size = [self.n_source, self.n_freq, self.n_mic, self.n_mic]
+        G_NFMM = torch.zeros(G_size, dtype=torch.complex128)
+        G_NFMM[:, :] = torch.eye(self.n_mic)
+        
+        if init_mode == 'ILRMA':
+            print("ILRMA")
+            ilrma = ILRMA(n_basis=16)
+            ilrma.initialize()
+            for _ in range(70):
+                ilrma.update()
+            ilrma.separate(mic_index=0)
+            print("ILRMA finished")
+            a_FNM = torch.linalg.pinv(ilrma.D_FMM)
+            
+            # output_N = self.n_source
+            # spoint, epoint = 0.1, 0.7
+            # separated_spec_power = torch.abs(ilrma.separate(mic_index=0)[:, int(ilrma.n_time*spoint):int(ilrma.n_time*epoint), :]).mean(dim=(0,1))
+            # n_args = torch.zeros((output_N))
+            # # hat_G_pNFMM = torch.zeros((output_N, self.F, self.M, self.M), dtype=torch.complex128) 
+            # for n in range(output_N):
+            #     n_args[n] = separated_spec_power.argmax()
+            #     separated_spec_power[separated_spec_power.argmax()] = 0
+            # n_args_1 = n_args.type(torch.int64)
+            # for n in range(self.n_source):
+            #     G_NFMM[n] = a_FNM[:, :, n_args[n], None] @ a_FNM[:, None, :, n_args[n]].conj() \
+            #         + 1e-4 * torch.eye(self.M)[None]
+            
+            separated_spec_power = torch.abs(ilrma.Z_FTN_ILRMA).mean(axis=(0, 1))
+            for n in range(self.n_source):
+                G_NFMM[n, :, :, :] = torch.einsum('fm,fl->fml', 
+                                                a_FNM[:, :, separated_spec_power.argmax()], 
+                                                a_FNM[:, :, separated_spec_power.argmax()].conj())
+                separated_spec_power[separated_spec_power.argmax()] = 0
+            # print(G_NFMM)
+            
+            G_NFMM = (G_NFMM + G_NFMM.conj().transpose(-2, -1)) / 2
+            G_NFMM = G_NFMM + eps * torch.eye(G_NFMM.shape[-1], dtype=torch.complex128, device=device)  # エルミート化
+            del ilrma
+            torch.clear_autocast_cache() #不要なキャッシュを削除
+            
+        elif init_mode == 'random':
+            print("random initialize")
+            random_matrix = torch.randn(self.n_source, self.n_freq, self.n_mic, self.n_mic, dtype=torch.complex128)
+            G_NFMM = torch.matmul(random_matrix, random_matrix.conj().transpose(-2, -1))
+            # print(G_NFMM)
+            G_NFMM = G_NFMM + eps * torch.eye(G_NFMM.shape[-1], dtype=torch.complex128, device=device)  # エルミート化
+            torch.clear_autocast_cache()
+        
+        self.gpu_L_NFMM = torch.linalg.cholesky(G_NFMM)
+        self.gpu_L_NFMM = torch.log(self.gpu_L_NFMM).detach()
+        self.gpu_L_NFMM.requires_grad_(True)
+        
+    def gather_N_from_ILRMA(self, output_N=2):
+        
+        spoint, epoint = 0.1, 0.7
+        separated_spec_power = torch.abs(self.ilrma.separate()[:, int(self.ilrma.T*spoint):int(self.ilrma.T*epoint), :]).mean(dim=(0,1))
+        n_args = torch.zeros((output_N))
+        # hat_G_pNFMM = torch.zeros((output_N, self.F, self.M, self.M), dtype=torch.complex128) 
+        for n in range(output_N):
+            n_args[n] = separated_spec_power.argmax()
+            separated_spec_power[separated_spec_power.argmax()] = 0
+        return n_args.type(torch.int64)
     
     def update_WH(self):
         #update aux
@@ -348,7 +425,6 @@ class MNMF:
         self.H_NKT = self.H_NKT * torch.sqrt(a_2 / b_2)
         self.normalize_WH()
     
-
     def log_prob_X(self) -> torch.Tensor:
         G_NFMM = torch.einsum("nfac,nfbc->nfab", torch.exp(self.gpu_L_NFMM), torch.exp(self.gpu_L_NFMM.conj())) 
         mu_NF = torch.einsum('...ii', G_NFMM).real
@@ -490,11 +566,11 @@ class MNMF:
         plt.scatter(mic_array_locs_xy[:, 0], mic_array_locs_xy[:, 1], color="black", marker="o", label="Mic Arrays", s=50)
         plt.scatter(ans_R_N_xy[:, 0], ans_R_N_xy[:, 1], color="white", marker="x", label="Ground Truth", s=100)
         plt.scatter(self.gpu_R_N[:, 0].cpu().numpy(), self.gpu_R_N[:, 1].cpu().numpy(), color="red", marker="x", label="Estimated", s=100)
-        plt.title("30th WH heatmap l2 Values for Grid Points at Height {:.1f}m ILRMA_70times  lr_l=1e-3, lr_r=1e-3, n_wh_update=500, n_g_update=100 ,n_R_update=10, gif_frames=50, alpha=1e-7".format(height))
+        plt.title("30th WH heatmap l2 Values for Grid Points at Height {:.1f}m ILRMA_70times".format(height))
         plt.xlabel("X (m)")
         plt.ylabel("Y (m)")
         plt.grid(True)
-        plt.savefig(save_root / f"{timestamp}30th_WH_l2_heatmap normalize_nothing ILRMA_70times  lr_l=1e-3, lr_r=1e-3, n_wh_update=500, n_g_update=100 ,n_R_update=10, gif_frames=50, alpha=1e-7.png")
+        plt.savefig(save_root / "30th_WH_l2_heatmap normalize_nothing ILRMA_70times.png")
         plt.show()
         
     def read_ply_to_tensor(self) -> torch.Tensor:
@@ -678,8 +754,8 @@ class MNMF:
         self.l2.append(l2.item())
         l2.backward()
         self.eta_optim.step()
-            
-    def train(self, lr_l=1e-3, lr_eta=1e-3, n_wh_update=500, n_g_update=100, n_eta_update=50, gif_frames=50, alpha=1e-7):
+    
+    def train(self, lr_l=2e-3, lr_eta=2e-3, n_wh_update=500, n_g_update=100, n_eta_update=50, gif_frames=50, alpha=1e-4):
         print("start optimization")
         torch.autograd.detect_anomaly(True)
         self.alpha = alpha
@@ -706,63 +782,46 @@ class MNMF:
         self.tortal_it = len(self.loss)
         create_gif()
         print("optimization is completed")
-        print(f"eta: {self.eta}")
-    
-    def plot_ply_eta_beta(self):
-        points = self.ply_locs[0].numpy()
-        colors = self.eta.numpy()
-        # 3Dプロットを作成
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection='3d')
-        # 各オブジェクトをプロット
-        for m in range(self.ply_locs.shape[0]):
-            sc = ax.scatter(points[m, :, 0],  # X座標
-                            points[m, :, 1],  # Y座標
-                            points[m, :, 2],  # Z座標
-                            c=colors[m, :],   # 色情報
-                            cmap='viridis',   # カラーマップ
-                            label=f'Object {m+1}')  # オブジェクトのラベル
-        # カラーバーを追加（オプション：全体に1つ共通のカラーバーを表示する場合）
-        plt.colorbar(sc, ax=ax, label="Color Scale")
-        # ラベルとタイトルの設定
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
-        ax.set_zlabel('Z')
-        ax.set_title('3D Point Cloud Visualization')
-        # 凡例を追加（オプション）
-        ax.legend()
-        # プロットを表示
-        plt.show()
+        self.params = (
+            f"lr_l={lr_l}, "
+            f"lr_eta={lr_eta}, "
+            f"n_wh_update={n_wh_update}, "
+            f"n_g_update={n_g_update}, "
+            f"alpha={alpha}"
+        )
         
-    def plot_ply_eta(self):
+    def plot_ply_eta(self, file_name="initial"):
         """
         ply_locs の各オブジェクトを描画し、対応する eta を色としてプロット
         """
-        import matplotlib.pyplot as plt
-        from mpl_toolkits.mplot3d import Axes3D
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection='3d')
-        for obj_idx, ply_tensor in enumerate(self.ply_locs):
-            points = ply_tensor.cpu().numpy()  # (N_obj, 3)
-            eta_obj = self.eta[obj_idx].detach().cpu().numpy()  # (N_obj,)
-            if points.shape[0] > eta_obj.shape[0]:
-                points = points[:eta_obj.shape[0], :]
-            elif points.shape[0] < eta_obj.shape[0]:
-                eta_obj = eta_obj[:points.shape[0]]
-            sc = ax.scatter(points[:, 0],  # X座標
-                            points[:, 1],  # Y座標
-                            points[:, 2],  # Z座標
-                            c=eta_obj,      # 色情報
-                            cmap='viridis', # カラーマップ
-                            label=f'Object {obj_idx+1}')  # オブジェクトのラベル
-        plt.colorbar(sc, ax=ax, label="Eta Values")
-        # ラベルとタイトル
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
-        ax.set_zlabel("Z")
-        ax.set_title("3D Point Cloud Visualization with Eta")
-        ax.legend()
-        plt.show()
+        viewpoints = [(30, 30), (30, 210)]
+        for i, (elev, azim) in enumerate(viewpoints):
+            fig = plt.figure()
+            ax = fig.add_subplot(111, projection='3d')
+            for obj_idx, ply_tensor in enumerate(self.ply_locs):
+                points = ply_tensor.cpu().numpy()  # (N_obj, 3)
+                eta_obj = self.eta[obj_idx].detach().cpu().numpy()  # (N_obj,)
+                if points.shape[0] > eta_obj.shape[0]:
+                    points = points[:eta_obj.shape[0], :]
+                elif points.shape[0] < eta_obj.shape[0]:
+                    eta_obj = eta_obj[:points.shape[0]]
+                sc = ax.scatter(points[:, 0],  # X座標
+                                points[:, 1],  # Y座標
+                                points[:, 2],  # Z座標
+                                c=eta_obj,      # 色情報
+                                cmap='viridis', # カラーマップ
+                                label=f'Object {obj_idx+1}')  # オブジェクトのラベル
+            plt.colorbar(sc, ax=ax, label="Eta Values")
+            # ラベルとタイトル
+            ax.set_xlabel("X")
+            ax.set_ylabel("Y")
+            ax.set_zlabel("Z")
+            ax.set_title("3D Point Cloud Visualization with Eta")
+            ax.legend()
+            ax.view_init(elev=elev, azim=azim)
+            file_path = save_root / f"{file_name}_eta_map_view{i+1}.png"
+            plt.savefig(file_path, dpi=300, bbox_inches="tight")
+            plt.show()
     
     def separated_sound_eval_SDR(self, mic_index=0):
         with torch.no_grad():
@@ -810,14 +869,16 @@ def plot_sdr(sdr_list):
     plt.ylabel("SDR (dB)")
     plt.title("SDR per Source over Iterations")
     plt.legend()
+    file_path = save_root / f"sdr.png"
+    plt.savefig(file_path, dpi=300, bbox_inches="tight")
     plt.show()
 
 #! main
 mnmf = MNMF(x_stft, n_source=2, n_basis=16)
 mnmf.initialize()   
-mnmf.plot_ply_eta()
+mnmf.plot_ply_eta(file_name="initial")
 mnmf.train()
-mnmf.plot_ply_eta()
+mnmf.plot_ply_eta(file_name="optimized")
 plot_sdr(mnmf.sdr_list)
 mnmf.separate(mic_index=0)                                                          
 # n_source = mnmf.Z_FTN.shape[-1]
@@ -836,15 +897,19 @@ for i in range(n_source):
     axs[i+1, 1].imshow(z_log, aspect='auto', origin='lower')
     axs[i+1, 2].imshow(x_log - z_log, aspect='auto', origin='lower')
 fig.tight_layout()
-fig.savefig(save_root/f"{timestamp}_separated_Sumura_model  lr_l=1e-3, lr_r=1e-3, n_wh_update=500, n_g_update=100 ,n_R_update=10, gif_frames=50, alpha=1e-7.png")
+fig.savefig(save_root/"separated_Sumura_model.png")
 plt.show()
 recon_sound = stft_tool.istft(mnmf.Z_FTN)
 recon_sound = recon_sound.detach().to("cpu").numpy()
 tortal_it = len(mnmf.loss)
 for i in range(n_source):
-    sf.write(save_root/f"{timestamp}_separated_{i}_Sumura_model- lr_l=1e-3, lr_r=1e-3, n_wh_update=500, n_g_update=100 ,n_R_update=10, gif_frames=50, alpha=1e-7.wav",
+    sf.write(save_root/f"separated_{i}_sound.wav",
                 recon_sound[i, :], samplerate),
 
+# 超パラメータ情報をテキストとして保存
+params_file = save_root / "params.txt"
+with open(params_file, "w") as f:
+    f.write(mnmf.params)
 
 # 保存した l1, l2, loss をグラフ化する
 fig, axs = plt.subplots(1, 3, figsize=(15, 5))
@@ -864,7 +929,7 @@ axs[2].set_xlabel("Update Step")
 axs[2].set_ylabel("Value")
 axs[2].legend()
 fig.tight_layout()
-fig.savefig(save_root / f"{timestamp}_loss_l1_l2_over_n_wh_update- lr_l=1e-3, lr_r=1e-3, n_wh_update=500, n_g_update=100 ,n_R_update=10, gif_frames=50, alpha=1e-7.png")
+fig.savefig(save_root / "loss_l1_l2_over_n_wh_update.png")
 plt.show() 
 
 
@@ -880,11 +945,11 @@ axs[1].set_title("R_N Distance for Source 2")
 axs[1].set_xlabel("Iteration")
 axs[1].set_ylabel("Distance")
 fig.tight_layout()
-fig.savefig(save_root/f"{timestamp}_R_distance_Sumura_model lr_l=1e-3, lr_r=1e-3, n_wh_update=400, n_g_update=4 ,n_R_update=30, gif_frames=50, alpha=1e-7.png")
+fig.savefig(save_root/"R_distance.png")
 plt.show()
 
 
 plot_fig.plot_R_N_with_initialR(
     mnmf.R_N.detach().cpu().numpy(), room_size=room_size, ans_R_N=ans_R_N, 
     mic_locs = mic_array_locs, init_R_N=mnmf.R_N_init.detach().cpu().numpy(),
-    filename = save_root / f"{timestamp}_R_N_with_init_R", it=mnmf.tortal_it, save=True)
+    filename = save_root / "R_N_with_init_R", it=mnmf.tortal_it, save=True)
