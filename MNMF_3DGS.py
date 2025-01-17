@@ -16,9 +16,11 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from plyfile import PlyData
 from tqdm  import tqdm
 from ILRMA_D_FMM import ILRMA
+from ILRMA_Su import ILRMA_Su
 from make_simu_2_Sumura import (
     mic_array_locs, mic_array_geometry, SOUND_POSITIONS,
     SOUND_SPEED, n_mics_per_array, ans_R_N, gpu_ans_R_N, room_size
@@ -29,18 +31,42 @@ from matplotlib import rc
 rc('animation', html='html5')  # HTML5ビデオ用の設定
 rc('animation', writer='imagemagick', codec='gif')  # ImageMagickを指定
 
-D = 3 # ３次元で実装
-# torch.set_default_dtype(torch.float64)
-device = "cuda" if torch.cuda.is_available() else \
-        "mps" if torch.backends.mps.is_available() else \
-        "cpu"
-torch.set_default_device(device)
-
-MIC_INDEX = 0  # どのマイクのsource imageを選択して出力するか
-EPS = torch.tensor(1e-8)
-
+D = 3 # ３次元で実装eps = 1e-5
+        # # print(f"n_source = {self.n_source}")
+        # # print(f"n_mic = {self.n_mic}")
+        # G_size = [self.n_source, self.n_freq, self.n_mic, self.n_mic]
+        # G_NFMM = torch.zeros(G_size, dtype=torch.complex128)
+        # G_NFMM[:, :] = torch.eye(self.n_mic)
+        # # print(f"zero_G_NFMM : {G_NFMM.shape}")
+        # print("ILRMA")
+        # ilrma = ILRMA(n_basis=16)
+        # ilrma.initialize()
+        # for _ in range(70):
+        #     ilrma.update()
+        # ilrma.separate()
+        # print("ILRMA finished")
+        # # a_FMMは混合行列print(f"R_N.shape : {self.gpu_R_N.shape}")
+        # # 分離行列の逆行列を計算することで混合行列を得る。
+        # a_FNM = torch.linalg.inv(ilrma.D_FMM)
+        # # print(f"a_FNM.shape : {a_FNM.shape}")
+        # #! ILRMAは決定系。この辺で次元の違いが生まれてる？
+        # #! ILRMAは16マイク16音源で動かしてる
+        # separated_spec_power = torch.abs(ilrma.Z_FTN_ILRMA).mean(axis=(0, 1))
+        # # print(f"separated_spec_power.shape : {separated_spec_power.shape}")
+        # # separated_spec_power = torch.abs(ilrma.Z_FTN).mean(axis=(0, 1))
+        # max_index = torch.argsort(separated_spec_power, descending=True)[:2]    #? [:2]を書き足した
+        # G_NFMM = torch.einsum('fmn,fln->nfml',a_FNM,a_FNM.conj())
+        # # if not G_NFMM.shape == G_size:
+        # #     print("G_NFMM.shape is not (N,F,M,M)")  #! shapeが想定と違かったら表示
+        # G_NFMM = G_NFMM[max_index]
+        # # print(f"G_NFMM.shape : {G_NFMM.shape}") #! ここではもうshapeがおかしい
+        # # self.G_NFMM = hat_G_NFMM.to(device)
+        # G_NFMM = (G_NFMM + G_NFMM.conj().transpose(-2, -1)) / 2
+        # G_NFMM = G_NFMM + eps * torch.eye(G_NFMM.shape[-1], dtype=torch.complex128, device=device)  # エルミート化
+        # del ilrma
+    # return device
 def torch_setup():
-    torch.set_default_dtype(torch.float32)
+    torch.set_default_dtype(torch.float64)
     if torch.cuda.is_available():
         torch.set_default_device("cuda")
         device = "cuda"
@@ -168,18 +194,19 @@ class MNMF:
             "/home/yoshiilab1/soturon/3dgs/ply_data/406ca340-e/point_cloud/iteration_30000/point_cloud.ply",
             "/home/yoshiilab1/soturon/3dgs/ply_data/2ebe532d-0/point_cloud/iteration_30000/point_cloud.ply"
         ]
-        self.ply_translate =[(1.0, 5.0, 0.0), (5.0, 1.0, 0.0)]
+        self.ply_translate =[(2.0, 6.0, 0.0), (6.0, 2.0, 0.0)]
         self.ply_rotation_angles = [315, 135]
 
     # パラメータの初期化
-    def initialize(self):
+    def initialize(self, G_init_mode, eta_init_mode):
         self.initialize_R(init_loc=SOUND_POSITIONS)
         self.initialize_WH()
-        self.initialize_G(init_mode='ILRMA')
+        self.initialize_G(init_mode=G_init_mode)
         # self.normalize_WHG()
         self.normalize_WH()
         self.read_ply_to_tensor()
-        self.initialize_eta(init_mode='random')   #! ply用に書き足し
+        self.initialize_eta(init_mode=eta_init_mode)   #! ply用に書き足し
+        self.plot_ply_eta(file_name="initial")
 
     def multiplicative_update_WH(self):
         # self.update_aux()
@@ -224,10 +251,8 @@ class MNMF:
         # self.R_N_init = self.R_N_init.detach()
         self.ans_R_N = ans_R_N
         self.gpu_ans_R_N = gpu_ans_R_N
-        self.gpu_R_N = self.R_N.to(device)
+        self.gpu_R_N = self.R_N.to(self.device)
         self.gpu_R_N.requires_grad_(True)
-
-
 
     def steering_vector(self, array_distance=False):
         U_IND = self.set_U_IND(gpu=True)
@@ -236,14 +261,14 @@ class MNMF:
     def set_U_IND(self, gpu=True):
         '''calculate U_IND from current R_N'''
         R_N = self.gpu_R_N
-        array_locs = torch.tensor(mic_array_locs).to(device)  # (D+1, I)
+        array_locs = torch.tensor(mic_array_locs).to(self.device)  # (D+1, I)
         # R_N を I 次元に拡張
         R_N_expanded = R_N.expand(array_locs.shape[1], -1, -1)  # (I, N, D)
         # U_IND 計算
         U_IND = R_N_expanded - array_locs.T[:, None, :D]  # (I, N, D)
         # 回転行列を適用
         theta = -torch.deg2rad(array_locs[D])  # (I)
-        R_mat = torch.zeros((self.I, D, D), dtype=torch.float64).to(device)  # (I, D, D)
+        R_mat = torch.zeros((self.I, D, D), dtype=torch.float64).to(self.device)  # (I, D, D)
         R_mat[:, 0, 0] = torch.cos(theta)
         R_mat[:, 0, 1] = -torch.sin(theta)
         R_mat[:, 1, 0] = torch.sin(theta)
@@ -254,13 +279,12 @@ class MNMF:
             U_IND = (R_mat[:, None, :D, :D] @ U_IND[..., None])[..., 0]  # squeezeを使用せず直接取り出す
         return U_IND
 
-
     def get_steering_vec(self, U_IND, array_distance=False, gpu=True) -> torch.Tensor:
-        self.gpu_array_geometry = torch.tensor(mic_array_geometry).to(device)
-        self.mic_array_locs = torch.tensor(self.mic_array_locs).to(device)
-        array_geometry = torch.zeros((D, n_mics_per_array), dtype=torch.float64, device=device)
+        self.gpu_array_geometry = torch.tensor(mic_array_geometry).to(self.device)
+        self.mic_array_locs = torch.tensor(self.mic_array_locs).to(self.device)
+        array_geometry = torch.zeros((D, n_mics_per_array), dtype=torch.float64, device=self.device)
         array_geometry[:2, :] = self.gpu_array_geometry # (3, Mi)
-        omega = 2 * torch.pi * torch.arange(self.n_freq, device=device)
+        omega = 2 * torch.pi * torch.arange(self.n_freq, device=self.device)
         delay = - torch.einsum("dm,ind->inm", array_geometry, U_IND) / SOUND_SPEED # (I, N, Mi)
         Q_IN = torch.linalg.norm(self.gpu_R_N[None,] - self.mic_array_locs.T[:,None,:3], axis=2)
         if array_distance:
@@ -268,7 +292,6 @@ class MNMF:
         else:
             steering_vec = torch.exp(-1j * torch.einsum("f,inm->infm", omega, delay)) # (I, N, F, Mi)
             return steering_vec
-
 
     # WHのランダム初期化
     def initialize_WH(self):
@@ -325,7 +348,7 @@ class MNMF:
         #         separated_spec_power[separated_spec_power.argmax()] = 0
         
         G_NFMM = (G_NFMM + G_NFMM.conj().transpose(-2, -1)) / 2
-        G_NFMM = G_NFMM + eps * torch.eye(G_NFMM.shape[-1], dtype=torch.complex128, device=device)  # エルミート化
+        G_NFMM = G_NFMM + eps * torch.eye(G_NFMM.shape[-1], dtype=torch.complex128, device=self.device)  # エルミート化
         del ilrma
         torch.clear_autocast_cache() #不要なキャッシュを削除
         self.gpu_L_NFMM = torch.linalg.cholesky(G_NFMM)
@@ -347,30 +370,14 @@ class MNMF:
             ilrma.separate(mic_index=0)
             print("ILRMA finished")
             a_FNM = torch.linalg.pinv(ilrma.D_FMM)
-            
-            # output_N = self.n_source
-            # spoint, epoint = 0.1, 0.7
-            # separated_spec_power = torch.abs(ilrma.separate(mic_index=0)[:, int(ilrma.n_time*spoint):int(ilrma.n_time*epoint), :]).mean(dim=(0,1))
-            # n_args = torch.zeros((output_N))
-            # # hat_G_pNFMM = torch.zeros((output_N, self.F, self.M, self.M), dtype=torch.complex128) 
-            # for n in range(output_N):
-            #     n_args[n] = separated_spec_power.argmax()
-            #     separated_spec_power[separated_spec_power.argmax()] = 0
-            # n_args_1 = n_args.type(torch.int64)
-            # for n in range(self.n_source):
-            #     G_NFMM[n] = a_FNM[:, :, n_args[n], None] @ a_FNM[:, None, :, n_args[n]].conj() \
-            #         + 1e-4 * torch.eye(self.M)[None]
-            
             separated_spec_power = torch.abs(ilrma.Z_FTN_ILRMA).mean(axis=(0, 1))
             for n in range(self.n_source):
                 G_NFMM[n, :, :, :] = torch.einsum('fm,fl->fml', 
                                                 a_FNM[:, :, separated_spec_power.argmax()], 
                                                 a_FNM[:, :, separated_spec_power.argmax()].conj())
                 separated_spec_power[separated_spec_power.argmax()] = 0
-            # print(G_NFMM)
-            
             G_NFMM = (G_NFMM + G_NFMM.conj().transpose(-2, -1)) / 2
-            G_NFMM = G_NFMM + eps * torch.eye(G_NFMM.shape[-1], dtype=torch.complex128, device=device)  # エルミート化
+            G_NFMM = G_NFMM + eps * torch.eye(G_NFMM.shape[-1], dtype=torch.complex128, device=self.device)  # エルミート化
             del ilrma
             torch.clear_autocast_cache() #不要なキャッシュを削除
             
@@ -379,9 +386,118 @@ class MNMF:
             random_matrix = torch.randn(self.n_source, self.n_freq, self.n_mic, self.n_mic, dtype=torch.complex128)
             G_NFMM = torch.matmul(random_matrix, random_matrix.conj().transpose(-2, -1))
             # print(G_NFMM)
-            G_NFMM = G_NFMM + eps * torch.eye(G_NFMM.shape[-1], dtype=torch.complex128, device=device)  # エルミート化
+            G_NFMM = G_NFMM + eps * torch.eye(G_NFMM.shape[-1], dtype=torch.complex128, device=self.device)  # エルミート化
+            torch.clear_autocast_cache()
+            
+        elif init_mode == 'ILRMA_Su':
+            print("ILRMA")
+            ilrma = ILRMA_Su()
+            stft_tool = STFT()
+            ilrma.import_obsdata(self.X_FTM.to(self.device), torch.tensor(self.n_freq).to(self.device))
+            ilrma.initialize_WH(n_basis=16)
+            ilrma.initialize_D()
+            for i in range(50):
+                ilrma.update_WH()
+                ilrma.update_D()
+                ilrma.normalize_WHD()
+            print("ILRMA finished")
+            spoint, epoint = 0.1, 0.7
+            A_FMN = torch.linalg.inv(ilrma.gpu_D_FNM)
+            separated_spec_power = torch.abs(ilrma.separate()[:, int(ilrma.T*spoint):int(ilrma.T*epoint), :]).mean(dim=(0, 1))
+            n_args = torch.zeros((self.n_source), dtype=torch.int64, device=self.device)
+            Z_FTN = ilrma.separate()
+            
+            print(f"Z_FTN.shape: {Z_FTN.shape}")
+            print(f"X_FTM.shape: {self.X_FTM.shape}")
+            X_FTM_flat = self.X_FTM.reshape(self.X_FTM.shape[0] * self.X_FTM.shape[1], self.X_FTM.shape[2]).to(self.device)
+            Z_FTN_flat = Z_FTN.reshape(Z_FTN.shape[0] * Z_FTN.shape[1], Z_FTN.shape[2]).to(self.device)
+            
+            inner_product = torch.sum(Z_FTN_flat * X_FTM_flat.conj(), dim=1)
+            norm_Z = torch.norm(Z_FTN_flat, dim=1)
+            norm_X = torch.norm(X_FTM_flat, dim=1)
+            
+            true_data_1 = "data/arctic_a0002.wav"
+            true_data_2 = "data/arctic_b0540.wav"
+            data_1, samplerate_1 = sf.read(true_data_1)
+            data_2, samplerate_2 = sf.read(true_data_2)
+            data_1 = data_1 - data_1.mean()
+            data_2 = data_2 - data_2.mean()
+            max_length = max(len(data_1), len(data_2))
+            data_1 = torch.tensor(data_1.T)
+            data_2 = torch.tensor(data_2.T)
+            data_1 = torch.nn.functional.pad(data_1, (0, max_length - len(data_1)))
+            data_2 = torch.nn.functional.pad(data_2, (0, max_length - len(data_2)))
+            x_stft_true_1 = stft_tool.stft(data_1)
+            x_stft_true_2 = stft_tool.stft(data_2)
+            x_stft_true = torch.cat([x_stft_true_1.unsqueeze(-1), x_stft_true_2.unsqueeze(-1)], dim=-1)
+            print(f"x_stft_true.shape: {x_stft_true.shape}")
+
+            arg_idx_list = []
+            for i in range(self.n_source):
+                # x_stft_trueのi番目の音源のスペクトルをフラットにする
+                x_stft_true_i = x_stft_true[:, :, i].reshape(-1).to(self.device)
+                x_stft_true_i = x_stft_true_i.unsqueeze(0)
+                print(f"x_stft_true_i: {x_stft_true_i.shape}")
+                # Z_FTNの各音源との内積とノルムを計算
+                cosine_similarities = []
+                for j in range(Z_FTN.shape[-1]):  # N個の音源
+                    Z_FTN_j = Z_FTN[:, :, j].reshape(-1).to(self.device)
+                    Z_FTN_j = Z_FTN_j.unsqueeze(0)
+                    # Z_FTN_j と x_stft_true_i の形状を確認・一致させる
+                    F_true, T_true = x_stft_true_i.shape
+                    F_Z, T_Z = Z_FTN_j.shape
+
+                    # 時間フレーム数を合わせる (パディングまたはリサンプリング)
+                    if T_true < T_Z:
+                        padding = T_Z - T_true
+                        x_stft_true_i = torch.nn.functional.pad(x_stft_true_i, (0, padding))
+                    elif T_true > T_Z:
+                        padding = T_true - T_Z
+                        Z_FTN_j = torch.nn.functional.pad(Z_FTN_j, (0, padding))
+
+                    # 周波数ビン数を合わせる (パディングまたはトリミング)
+                    if F_true < F_Z:
+                        padding = F_Z - F_true
+                        x_stft_true_i = torch.nn.functional.pad(x_stft_true_i, (0, padding))
+                    elif F_true > F_Z:
+                        Z_FTN_j = Z_FTN_j[:F_true]
+                    # 内積とノルム
+                    inner_product = torch.sum(Z_FTN_j * x_stft_true_i.conj())
+                    norm_Z = torch.norm(Z_FTN_j)
+                    norm_X = torch.norm(x_stft_true_i)
+                    # コサイン類似度
+                    cosine_similarity = inner_product / (norm_Z * norm_X)
+                    cosine_similarities.append(cosine_similarity)
+                    cosine_similarities_abs = torch.abs(torch.tensor(cosine_similarities))
+                # 最も類似度が高いインデックスを取得
+                best_idx = torch.argmax(cosine_similarities_abs).item()
+                arg_idx_list.append(best_idx)
+
+            print(f"arg_idx_list: {arg_idx_list}")
+            
+            print(f"arg_idx_list: {arg_idx_list}")
+            for n in range(self.n_source):
+                G_NFMM[n] = A_FMN[:, :, arg_idx_list[n]][:, :, None] @ A_FMN[:, :, arg_idx_list[n]][:, None].conj() \
+                    + 1e-2 * torch.eye(self.n_mic, dtype=torch.complex128, device=self.device)[None]
+                n_args[n] = arg_idx_list[n]
+            print(f"n_arg: {n_args}")
+            self.W_NFK = ilrma.gpu_W_NFK[n_args, :, :].to(torch.complex128)
+            self.H_NKT = ilrma.gpu_H_NKT[n_args, :, :].to(torch.complex128)
+            print(f"W_NFK.shape: {self.W_NFK.shape}")
+            print(f"H_NKT.shape: {self.H_NKT.shape}")
+            torch.clear_autocast_cache()
+            
+        elif init_mode == 'GS':
+            print("initialize G from 3DGS")
+            self.set_U_NIVnD_ply()
+            self.get_steering_vec_ply()
+            G_NFMM = self.compute_hat_G_ply()
+            G_NFMM = (G_NFMM + G_NFMM.conj().transpose(-2, -1)) / 2
+            G_NFMM = G_NFMM + eps * torch.eye(G_NFMM.shape[-1], dtype=torch.complex128, device=self.device)  # エルミート化
             torch.clear_autocast_cache()
         
+        print("self.W_NFK.dtype:", self.W_NFK.dtype)
+        print("self.H_NKT.dtype:", self.H_NKT.dtype)
         self.gpu_L_NFMM = torch.linalg.cholesky(G_NFMM)
         self.gpu_L_NFMM = torch.log(self.gpu_L_NFMM).detach()
         self.gpu_L_NFMM.requires_grad_(True)
@@ -401,6 +517,10 @@ class MNMF:
         #update aux
         with torch.no_grad():
             G_NFMM = torch.einsum("nfac,nfbc->nfab", torch.exp(self.gpu_L_NFMM), torch.exp(self.gpu_L_NFMM.conj()))
+        print(f"lambda.shape: {self.lambda_NFT.shape}")
+        print(f"G_NFMM.shape: {G_NFMM.shape}")
+        print("self.lambda_NFT.dtype:", self.lambda_NFT.dtype)
+        print("G_NFMM.dtype:", G_NFMM.dtype)
         iY_FTMM = torch.einsum('nft,nfml->ftml',
                                     self.lambda_NFT, G_NFMM).inverse()
         Yx_FTM1 = iY_FTMM @ self.X_FTM[..., None]
@@ -512,7 +632,7 @@ class MNMF:
                 self.l2_when_wh_updated.append(self.l2[-1])
                 self.loss_when_wh_updated.append(self.loss[-1])
                 for n in range(self.n_source):
-                    R_dist = torch.norm(self.gpu_R_N[n].detach() - self.gpu_ans_R_N[n].to(device))
+                    R_dist = torch.norm(self.gpu_R_N[n].detach() - self.gpu_ans_R_N[n].to(self.device))
                     self.R_distance[n].append(R_dist.item())  # 各音源ごとの距離を保存
                 
                 # 損失ログと更新
@@ -524,8 +644,8 @@ class MNMF:
         
     def calculate_l2_grid(self, room_size, grid_interval=0.1, height=1.6):
         # グリッド点の生成 (x, y 固定間隔で生成)
-        x = torch.arange(0, room_size[0] + grid_interval, grid_interval, device=device)
-        y = torch.arange(0, room_size[1] + grid_interval, grid_interval, device=device)
+        x = torch.arange(0, room_size[0] + grid_interval, grid_interval, device=self.device)
+        y = torch.arange(0, room_size[1] + grid_interval, grid_interval, device=self.device)
         X, Y = torch.meshgrid(x, y, indexing='ij')  # 明示的にインデックス順を指定
         
         # 平面内のグリッド座標を構築
@@ -643,11 +763,11 @@ class MNMF:
         self.steering_vec_ply = []
         i = 0
         for U_IVnD in self.U_NIVnD:
-            gpu_array_geometry = torch.tensor(mic_array_geometry).to(device)
-            gpu_mic_array_locs = torch.tensor(mic_array_locs).to(device)
-            array_geometry = torch.zeros((D, n_mics_per_array), dtype=torch.float64, device=device)
+            gpu_array_geometry = torch.tensor(mic_array_geometry).to(self.device)
+            gpu_mic_array_locs = torch.tensor(mic_array_locs).to(self.device)
+            array_geometry = torch.zeros((D, n_mics_per_array), dtype=torch.float64, device=self.device)
             array_geometry[:2, :] = gpu_array_geometry # (2, Mi)
-            omega = 2 * torch.pi * torch.arange(self.n_freq, device=device)
+            omega = 2 * torch.pi * torch.arange(self.n_freq, device=self.device)
             delay = - opt_einsum.contract("dm,ind->inm", array_geometry, U_IVnD) / SOUND_SPEED # (I, N, Mi)
             Q_IN = torch.linalg.norm(self.ply_locs[i][None,] - gpu_mic_array_locs.T[:,None,:3], axis=2)
             i += 1
@@ -695,15 +815,19 @@ class MNMF:
                         padding_size = weight_tensor.shape[0] - part_result.shape[0]
                         part_result = torch.cat([part_result, torch.zeros(padding_size, *part_result.shape[1:], dtype=part_result.dtype, device=self.device)], dim=0)
                     # print(f"weight_tensor.shape: {weight_tensor.shape}")
-                    # part_result *= weight_tensor[:, None, None, None]   #! 次元の不一致
+                    # part_result *= weight_tensor[:, None, None, None]
                     part_result = torch.einsum('v,vfmn->vfmn', weight_tensor, part_result)
+                else:
+                    # 重みがない場合は単純平均
+                    part_result = part_result / part_result.shape[0]
+                    
                 part_result = part_result.sum(dim=0)    # (F, Mi, Mi)
                 start = n_mics_per_array * j
                 end = n_mics_per_array * (j+1)
                 hat_G_ply_NFMM[i, :, start:end, start:end] += part_result / steering_vec_i.shape[1]
                 del part_result
                 torch.cuda.empty_cache()
-        hat_G_ply_NFMM += eps * torch.eye(self.n_mic, device=device)[None, :, :]
+        hat_G_ply_NFMM += eps * torch.eye(self.n_mic, device=self.device)[None, :, :]
         return hat_G_ply_NFMM
     
     def initialize_eta(self, init_mode='random'):
@@ -719,7 +843,7 @@ class MNMF:
             # ]
             eta_full = torch.rand((len(self.ply_locs), max_length), device=self.device)
         elif init_mode == 'constant':
-            self.eta = torch.stack([torch.full((len(self.ply_locs[i]),), 1, device=self.device, requires_grad=True) for i in range(len(self.ply_locs))])
+            eta_full = torch.ones((len(self.ply_locs), max_length), device=self.device)
         # ゼロパディング
         for i, length in enumerate(length):
             eta_full[i, length:] = 0
@@ -818,6 +942,9 @@ class MNMF:
             ax.set_zlabel("Z")
             ax.set_title("3D Point Cloud Visualization with Eta")
             ax.legend()
+            ax.set_xlim(0, 8)
+            ax.set_ylim(0, 8)
+            ax.set_zlim(0, 2.5)
             ax.view_init(elev=elev, azim=azim)
             file_path = save_root / f"{file_name}_eta_map_view{i+1}.png"
             plt.savefig(file_path, dpi=300, bbox_inches="tight")
@@ -875,14 +1002,14 @@ def plot_sdr(sdr_list):
 
 #! main
 mnmf = MNMF(x_stft, n_source=2, n_basis=16)
-mnmf.initialize()   
-mnmf.plot_ply_eta(file_name="initial")
-mnmf.train()
+mnmf.initialize(G_init_mode='ILRMA_Su', eta_init_mode='constant')   
+mnmf.train(lr_l=2e-3, lr_eta=2e-3, n_wh_update=10, n_g_update=10, n_eta_update=10, gif_frames=50, alpha=1)
+
 mnmf.plot_ply_eta(file_name="optimized")
 plot_sdr(mnmf.sdr_list)
 mnmf.separate(mic_index=0)                                                          
-# n_source = mnmf.Z_FTN.shape[-1]
-n_source = 2
+n_source = mnmf.Z_FTN.shape[-1]
+# n_source = 2
 fig, axs = plt.subplots(n_source+1, 3, figsize=(10, 10))
 cpu_loss = [loss for loss in mnmf.loss]
 cpu_loss1 = [l1 for l1 in mnmf.l1]
@@ -896,6 +1023,9 @@ for i in range(n_source):
     axs[i+1, 0].imshow(x_log, aspect='auto', origin='lower')
     axs[i+1, 1].imshow(z_log, aspect='auto', origin='lower')
     axs[i+1, 2].imshow(x_log - z_log, aspect='auto', origin='lower')
+axs[0,0].set_title("Loss1")
+axs[0,1].set_title("Loss2")
+axs[0,2].set_title("Total Loss")
 fig.tight_layout()
 fig.savefig(save_root/"separated_Sumura_model.png")
 plt.show()

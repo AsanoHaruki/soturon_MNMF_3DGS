@@ -21,7 +21,7 @@ F = int(N_FFT/2+1)  # 周波数ビン数
 # 部屋のパラメータ
 absorption = 0.6  # 吸音率
 MAX_REFLECTION_ORDER = 6    # 反射の最大回数
-corners = np.array([[0, 0], [0, 6], [6, 6], [6 , 0]]).T  # [x, y] (meter)
+corners = np.array([[0, 0], [0, 8], [8, 8], [8 , 0]]).T  # [x, y] (meter)
 room_size = np.array([
     corners[0].max() - corners[0].min(),  # x方向の長さ
     corners[1].max() - corners[1].min(),  # y方向の長さ
@@ -46,27 +46,27 @@ mic_array_geometry = np.array([  # 形状: (2, n_mics_per_array)
 
 # マイクアレイの中心位置と回転角度
 mic_array_locs = np.array([  # 形状: (I, 4)
-    [0.3, 0.3, center_z, 0],       
-    [0.1, 5.8, center_z, np.pi],   
-    [5.6, 5.5, center_z, np.pi/2], 
-    [5.8, 0.1, center_z, -np.pi/2]  # 部屋の4つ角にマイクを配置
+    [4.3, 0.3, center_z, 0],       
+    [0.1, 3.8, center_z, np.pi],   
+    [4.2, 7.5, center_z, np.pi/2], 
+    [7.8, 4.1, center_z, -np.pi/2]  # 部屋の4つ角にマイクを配置
 ]).T  # 転置して形状を (4, I) に変更
 #? mic_array_locs.shape : (4, I) マイクアレイの台数*座標とθ
 
 class array_centers():  #! マイクアレイ中心を自分で指定
     def set_array_centers(self):
         self.array_locs = np.array([
-        [0.2, 0.2],     
-        [0.1, 5.8],     
-        [5.6, 5.8],     
-        [5.8, 0.1]      
+        [4.3, 0.3],     
+        [0.1, 3.8],     
+        [4.2, 7.5],     
+        [7.8, 4.1]      
         ])
 
         self.gpu_array_locs = torch.tensor([
-        [0.2, 0.2],     
-        [0.1, 5.8],     
-        [5.6, 5.8],     
-        [5.8, 0.1]  
+        [4.3, 0.3],     
+        [0.1, 3.8],     
+        [4.2, 7.5],     
+        [7.8, 4.1]  
         ], dtype=torch.float32)  # dtypeは必要に応じてfloat64に変更可能
         
 def rotate_coordinates(xy, deg: int) -> np.ndarray:
@@ -108,13 +108,13 @@ room.add_microphone_array(mic_array)
 
 # 音源設定
 SOUND_POSITIONS = np.array([
-    [1.18, 5.0, 1.61],
-    [5.06, 0.87, 1.46]    
+    [2.18, 6.0, 1.61],
+    [6.06, 1.87, 1.46]    
 ])
 
 gpu_SOUND_POSITIONS = torch.tensor([
-    [1.18, 5.0, 1.61],
-    [5.06, 0.87, 1.46]
+    [2.18, 6.0, 1.61],
+    [6.06, 1.87, 1.46]
 ])
 
 ans_R_N = SOUND_POSITIONS
@@ -132,17 +132,17 @@ for position, file in zip(SOUND_POSITIONS, files):
 
 #! 部屋の形状の可視化
 fig, ax = room.plot()
-ax.set_ylim([0,6])
-ax.set_xlim([0,6])
+ax.set_ylim([0,8])
+ax.set_xlim([0,8])
 ax.set_zlim([0,2.5])
 
 #! 2D plot
-plt.figure(figsize=(6, 6))  # 図のサイズを指定
+plt.figure(figsize=(8, 8))  # 図のサイズを指定
 plt.title("Microphones and Sources")
 plt.xlabel("X position (m)")
 plt.ylabel("Y position (m)")
-plt.xlim(0, 6)
-plt.ylim(0, 6)
+plt.xlim(0, 8)
+plt.ylim(0, 8)
 
 # マイクの位置をプロット
 plt.scatter(MIC_POSITIONS[0],MIC_POSITIONS[1], label='Microphones', color='blue', marker='o')
@@ -161,7 +161,7 @@ plt.axhline(y=center_y, color='gray', linestyle='--', linewidth=0.8)  # 中心�
 plt.grid()  # グリッドを表示
 plt.legend()  # 凡例を表示
 
-# plt.show()  # 2Dプロット
+plt.show()  # 2Dプロット
 
 N = len(files)
 # 生成した音声の可視化・確認

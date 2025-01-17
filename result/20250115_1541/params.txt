@@ -1,0 +1,1 @@
+lr_l=0.002, lr_eta=0.002, n_wh_update=10, n_g_update=10, alpha=1
