@@ -5,7 +5,7 @@ import numpy as np
 import datetime
 import torch
 from pathlib import Path
-from make_simu_2_Sumura import (
+from make_simu_2_Sumura_corner import (
     mic_array_locs, mic_array_geometry, SOUND_POSITIONS,
     SOUND_SPEED, n_mics_per_array, ans_R_N, gpu_ans_R_N, room_size
 )

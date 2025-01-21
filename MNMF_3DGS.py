@@ -21,7 +21,7 @@ from plyfile import PlyData
 from tqdm  import tqdm
 from ILRMA_D_FMM import ILRMA
 from ILRMA_Su import ILRMA_Su
-from make_simu_2_Sumura import (
+from make_simu_2_Sumura_corner import (
     mic_array_locs, mic_array_geometry, SOUND_POSITIONS,
     SOUND_SPEED, n_mics_per_array, ans_R_N, gpu_ans_R_N, room_size
 )

@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import pickle as pic
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
-import plot_fig
+# import plot_fig
 import matplotlib.animation as animation
 import mir_eval
 plt.style.use('ud.mplstyle')
@@ -22,7 +22,7 @@ from plyfile import PlyData
 from tqdm  import tqdm
 from ILRMA_D_FMM import ILRMA
 from ILRMA_Su import ILRMA_Su
-from make_simu_2_Sumura import (
+from make_simu_2_Sumura_center import (
     mic_array_locs, mic_array_geometry, SOUND_POSITIONS,
     SOUND_SPEED, n_mics_per_array, ans_R_N, gpu_ans_R_N, room_size
 )
@@ -170,7 +170,7 @@ class MNMF:
         self.lambda_NFT = self.W_NFK @ self.H_NKT
         
     def initialize_G(self, init_mode='ILRMA'):
-        eps = 1e-5
+        eps = 1e-1
         G_size = [self.n_source, self.n_freq, self.n_mic, self.n_mic]
         G_NFMM = torch.zeros(G_size, dtype=torch.complex128)
         # print(f"init_G_NFMM.shape: {G_NFMM.shape}")
@@ -210,13 +210,18 @@ class MNMF:
             G_NFMM = self.compute_hat_G_ply()
             # print(f"after_GS_G_NFMM.shape: {G_NFMM.shape}")
             G_NFMM = (G_NFMM + G_NFMM.conj().transpose(-2, -1)) / 2
-            G_NFMM = G_NFMM + eps * torch.eye(G_NFMM.shape[-1], dtype=torch.complex128, device=self.device)  # エルミート化
+            
+            #? epsの加算でフルランク化．この加算は正規化後に行う．
+            # G_NFMM = G_NFMM + eps * torch.eye(G_NFMM.shape[-1], dtype=torch.complex128, device=self.device)  # エルミート化
+            
             # 雑音に割り当てる音源は単位行列で初期化
             n_noise = self.n_source - G_NFMM.shape[0]
             if n_noise > 0:
                 I = torch.eye(G_NFMM.shape[-1], dtype=torch.complex128, device=self.device)
                 G_noise = torch.einsum('ij,kf->kfij', I, torch.ones((n_noise, self.n_freq), dtype=torch.complex128, device=self.device))
                 G_NFMM = torch.cat((G_NFMM, G_noise), dim=0)
+            self.normalize_initial(G_NFMM)
+            G_NFMM = G_NFMM + eps * torch.eye(G_NFMM.shape[-1], dtype=torch.complex128, device=self.device)
             torch.clear_autocast_cache()
             
         elif init_mode == 'ILRMA_Su':
@@ -240,6 +245,11 @@ class MNMF:
                 G_NFMM[n] = A_FMN[:, :, sorted_idx[n]][:, :, None] @ A_FMN[:, :, sorted_idx[n]][:, None].conj() \
                     + 1e-2 * torch.eye(self.n_mic, dtype=torch.complex128, device=self.device)[None]
                 n_args[n] = sorted_idx[n]
+            for n in range(self.n_source):
+                self.W_NFK[n] = ilrma.gpu_W_NFK[sorted_idx[n], :, :].to(torch.complex128)
+                self.H_NKT[n] = ilrma.gpu_H_NKT[sorted_idx[n], :, :].to(torch.complex128)
+            print(f"W_NFK.shape: {self.W_NFK.shape}")
+            print(f"H_NKT.shape: {self.H_NKT.shape}")
             # self.W_NFK = ilrma.gpu_W_NFK[n_args, :, :].to(torch.complex128)
             # self.H_NKT = ilrma.gpu_H_NKT[n_args, :, :].to(torch.complex128)
             # ILRMAでの分離音を保存
@@ -251,9 +261,10 @@ class MNMF:
             for i in range(Z_FTN.shape[-1]):
                 sf.write(ILRMA_save_root/f"ILRMA_separated_{i}_sound.wav",
                             recon_sound[i, :], samplerate),
+            print(G_NFMM)
             torch.clear_autocast_cache()
         
-        self.gpu_L_NFMM = torch.linalg.cholesky(G_NFMM)
+        self.gpu_L_NFMM = torch.linalg.cholesky(G_NFMM) # エルミート行列である必要
         self.gpu_L_NFMM = torch.log(self.gpu_L_NFMM).detach()
         self.gpu_L_NFMM.requires_grad_(True)
         
@@ -291,7 +302,7 @@ class MNMF:
                tr_G_iY_NFT[:, :, None]).sum(axis=1)
         self.W_NFK = self.W_NFK * torch.sqrt(a_1 / b_1)
         self.H_NKT = self.H_NKT * torch.sqrt(a_2 / b_2)
-        self.normalize_WH()
+        # self.normalize_WH()
     
     def log_prob_X(self) -> torch.Tensor:
         G_NFMM = torch.einsum("nfac,nfbc->nfab", torch.exp(self.gpu_L_NFMM), torch.exp(self.gpu_L_NFMM.conj())) 
@@ -313,13 +324,29 @@ class MNMF:
         nu_NK = self.W_NFK.sum(axis=1)
         self.W_NFK = self.W_NFK / nu_NK[:, None]
         self.H_NKT = self.H_NKT * nu_NK[:, :, None]
-        self.lambda_NFT = self.W_NFK @ self.H_NKT + self.eps    
+        self.lambda_NFT = self.W_NFK @ self.H_NKT + self.eps   
+        
+    def normalize_initial(self, G_NFMM):
+        #? 計算グラフを切るかどうか
+        mu_NF = torch.einsum('...ii', G_NFMM).real
+        G_NFMM = G_NFMM / mu_NF[:, :, None, None]
+        self.W_NFK = self.W_NFK * mu_NF[:, :, None]
+        nu_NK = self.W_NFK.sum(axis=1)
+        self.W_NFK = self.W_NFK / nu_NK[:, None]
+        self.H_NKT = self.H_NKT * nu_NK[:, :, None]
+        self.lambda_NFT = self.W_NFK @ self.H_NKT #+ self.eps
     
     def normalize_WH(self):
         nu_NK = self.W_NFK.sum(axis=1)
         self.W_NFK = self.W_NFK / nu_NK[:, None]
         self.H_NKT = self.H_NKT * nu_NK[:, :, None]
         self.lambda_NFT = self.W_NFK @ self.H_NKT + self.eps
+        
+    def normalize_G(self):
+        with torch.no_grad():
+            G_NFMM = torch.einsum("nfac,nfbc->nfab", torch.exp(self.gpu_L_NFMM), torch.exp(self.gpu_L_NFMM.conj())) 
+            mu_NF = torch.einsum('...ii', G_NFMM).real
+            self.G_NFMM = (G_NFMM / mu_NF[:, :, None, None])
         
     def separate(self, mic_index=0):
         G_NFMM = torch.einsum("nfac,nfbc->nfab", torch.exp(self.gpu_L_NFMM), torch.exp(self.gpu_L_NFMM.conj()))
@@ -590,9 +617,9 @@ class MNMF:
             ax.set_zlabel("Z")
             ax.set_title("3D Point Cloud Visualization with Eta")
             ax.legend()
-            ax.set_xlim(0, 8)
-            ax.set_ylim(0, 8)
-            ax.set_zlim(0, 2.5)
+            ax.set_xlim(0, room_size[0])
+            ax.set_ylim(0, room_size[1])
+            ax.set_zlim(0, room_size[3])
             ax.view_init(elev=elev, azim=azim)
             file_path = save_root / f"{file_name}_eta_map_view{i+1}.png"
             plt.savefig(file_path, dpi=300, bbox_inches="tight")
@@ -653,23 +680,25 @@ class MNMF:
         with tqdm(range(n_wh_update), desc='WH Updates', leave=True) as pbar_wh:
             for j in pbar_wh:
                 self.multiplicative_update_WH()
+                if not j > n_wh_update / 3:
+                    self.normalize_WH()
+                # self.normalize_WH()
                 loss = -self.log_prob_X()
                 self.loss.append(loss.item())
                 self.separated_sound_eval_SDR(mic_index=0)
                 # for k in range(n_g_update):
                 #     self.update_G()
-                self.loss_when_wh_updated.append(self.loss[-1])
-                if j > 2*n_wh_update / 3:
+                
+                if j > n_wh_update / 3:
                     for k in range(n_g_update):
                         self.update_G()
+                        self.normalize_WHG()
+                self.loss_when_wh_updated.append(self.loss[-1])
         
         self.tortal_it = len(self.loss)
         print("optimization is completed")
         self.normalize_WHG()
-        self.params = (
-            f"lr_l={lr_l}, "
-            f"n_wh_update={n_wh_update}, "
-        )
+        self.params = f"lr_l={lr_l}, n_wh_update={n_wh_update}, n_source={self.n_source}, n_basis={self.n_basis}"
 
 def plot_sdr(sdr_list):
     num_sources = len(sdr_list)
@@ -685,9 +714,9 @@ def plot_sdr(sdr_list):
     plt.show()
 
 #! main
-mnmf = MNMF(x_stft, n_source=3, n_basis=4)
+mnmf = MNMF(x_stft, n_source=3, n_basis=16)
 mnmf.initialize(G_init_mode='GS', eta_init_mode='constant')   
-mnmf.train_only_separate(lr_l=2e-3, n_wh_update=1000, n_g_update=1)
+mnmf.train_only_separate(lr_l=1e-2, n_wh_update=300, n_g_update=2)
 print(f"len(loss): {len(mnmf.loss_when_wh_updated)}")
 # mnmf.plot_ply_eta(file_name="optimized")
 plot_sdr(mnmf.sdr_list)
