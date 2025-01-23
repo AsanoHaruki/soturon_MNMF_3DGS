@@ -1,0 +1,1 @@
+lr_l=0.01, n_wh_update=300, n_source=3, n_basis=16, n_g_update=3, n_source=3

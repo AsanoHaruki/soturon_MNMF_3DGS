@@ -15,12 +15,12 @@ from scipy.io import wavfile
 SOUND_SPEED = 340.
 SAMPLING_RATE = 16000  # 保存するときのサンプリングレート
 N_FFT = 1024  # 窓幅
-HOP_LENGTH = 256  # シフト幅（オーバラップをどれだけにするか）
+HOP_LENGTH = 160  # シフト幅（オーバラップをどれだけにするか）
 F = int(N_FFT/2+1)  # 周波数ビン数
 
 # 部屋のパラメータ
-absorption = 0.6  # 吸音率
-MAX_REFLECTION_ORDER = 6    # 反射の最大回数
+absorption = 0.9  # 吸音率
+MAX_REFLECTION_ORDER = 1    # 反射の最大回数
 corners = np.array([[0, 0], [0, 8], [8, 8], [8 , 0]]).T  # [x, y] (meter)
 room_size = np.array([
     corners[0].max() - corners[0].min(),  # x方向の長さ
@@ -122,7 +122,7 @@ gpu_ans_R_N = gpu_SOUND_POSITIONS
 
 # 音声ファイル
 files = ["data/arctic_a0002.wav",
-         "data/arctic_b0540.wav",]
+         "data/arctic_b0540.wav"]
 
 # 音源を配置
 for position, file in zip(SOUND_POSITIONS, files):
@@ -206,10 +206,15 @@ def convolve_RIR(signal_NT):
     return mixture_signal_MT
 
 mixture_signal_MT = convolve_RIR(wav_NT)
-output_path = "/home/yoshiilab1/soturon/mnmf/code/self_data/mixture_time_domain_2_corner.wav"
-output_dir = os.path.dirname(output_path)
+output_dir = "/home/yoshiilab1/soturon/mnmf/code/self_data/mixture_wav_files/"
 if not os.path.exists(output_dir):
     os.makedirs(output_dir)
-sf.write(output_path, mixture_signal_MT.T, 16000)
-# 混合音データ出力先
-# visualize_wav(mixture_signal_MT)
+# output_dir = os.path.dirname(output_path)
+for i in range(mixture_signal_MT.shape[0]):
+    output_path = os.path.join(output_dir, f"mic_{i+1}_mixture.wav")
+    sf.write(output_path, mixture_signal_MT[i,:].T, SAMPLING_RATE)
+# if not os.path.exists(output_dir):
+#     os.makedirs(output_dir)
+# sf.write(output_path, mixture_signal_MT.T, 16000)
+# # 混合音データ出力先
+# # visualize_wav(mixture_signal_MT)

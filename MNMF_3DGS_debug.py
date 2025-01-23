@@ -20,9 +20,10 @@ import torch.nn.functional as F
 import itertools
 from plyfile import PlyData
 from tqdm  import tqdm
+from torch.optim import lr_scheduler
 from ILRMA_D_FMM import ILRMA
 from ILRMA_Su import ILRMA_Su
-from make_simu_2_Sumura_center import (
+from make_simu_2_Sumura_2_coner import (
     mic_array_locs, mic_array_geometry, SOUND_POSITIONS,
     SOUND_SPEED, n_mics_per_array, ans_R_N, gpu_ans_R_N, room_size
 )
@@ -51,7 +52,7 @@ def torch_setup():
 class STFT:
     def __init__(self) -> None:
         self.n_fft = 1024
-        self.hop_length = self.n_fft // 4
+        self.hop_length = self.n_fft // 8  # ホップ長を小さくするほど計算コスト↑、時間分解能↑
         self.window = torch.hann_window(self.n_fft)
 
     def stft(self, wav: torch.tensor):
@@ -68,7 +69,8 @@ class STFT:
         # B: batch size, F: frequency, T: time
         n_freq = spec.shape[0]
         spec = spec.permute(2, 0, 1)
-        hop_length = (n_freq-1) // 2
+        # hop_length = (n_freq-1) // 2
+        hop_length = self.hop_length
         tmp = torch.istft(spec,
                           n_fft=self.n_fft,
                           hop_length=hop_length,
@@ -82,12 +84,16 @@ save_root = Path(f"result/{timestamp}_only_separate")
 save_root.mkdir(exist_ok=True)
 data_file = data_root / "mixture_time_domain_2_corner.wav"
 data, samplerate = sf.read(data_file)
+print(data[28400][0])
 data = data - data.mean()
 data = torch.tensor(data.T)
+print(f"len(data): {len(data[0])}")
+print(data[0][28400])
 stft_tool = STFT()
 x_stft = stft_tool.stft(data).permute(1, 2, 0)
 x_stft[x_stft.abs() < 1e-15] = 1e-15
 x_stft = x_stft / x_stft.abs().max()
+print(f"x_stft.shape: {x_stft.shape}")
 
 def multi_log_prob_complex_normal(x: torch.Tensor, mu: torch.Tensor, Sigma: torch.Tensor):
     d = x.shape[-1]
@@ -128,8 +134,8 @@ class MNMF:
             "/home/yoshiilab1/soturon/3dgs/ply_data/406ca340-e/point_cloud/iteration_30000/point_cloud.ply",
             "/home/yoshiilab1/soturon/3dgs/ply_data/2ebe532d-0/point_cloud/iteration_30000/point_cloud.ply"
         ]
-        self.true_sources = [np.array(sf.read('data/arctic_a0002.wav')[0]),  # 正解データの読み込み
-                        np.array(sf.read('data/arctic_b0540.wav')[0])]
+        self.true_sources = [np.array(sf.read('data/a01.wav')[0]),  # 正解データの読み込み
+                        np.array(sf.read('data/a03.wav')[0])]
         self.ply_translate =[(2.0, 6.0, 0.0), (6.0, 2.0, 0.0)]
         self.ply_rotation_angles = [315, 135]
 
@@ -159,6 +165,9 @@ class MNMF:
     
     # WHのランダム初期化
     def initialize_WH(self):
+        
+        torch.manual_seed(0)    # デバッグ用にシード値を固定
+        
         W_size = [self.n_source, self.n_freq, self.n_basis]
         H_size = [self.n_source, self.n_basis, self.n_time]
         self.W_NFK = torch.rand(W_size)
@@ -170,7 +179,7 @@ class MNMF:
         self.lambda_NFT = self.W_NFK @ self.H_NKT
         
     def initialize_G(self, init_mode='ILRMA'):
-        eps = 1e-1
+        eps = 1e-3
         G_size = [self.n_source, self.n_freq, self.n_mic, self.n_mic]
         G_NFMM = torch.zeros(G_size, dtype=torch.complex128)
         # print(f"init_G_NFMM.shape: {G_NFMM.shape}")
@@ -209,7 +218,7 @@ class MNMF:
             self.get_steering_vec_ply()
             G_NFMM = self.compute_hat_G_ply()
             # print(f"after_GS_G_NFMM.shape: {G_NFMM.shape}")
-            G_NFMM = (G_NFMM + G_NFMM.conj().transpose(-2, -1)) / 2
+            # G_NFMM = (G_NFMM + G_NFMM.conj().transpose(-2, -1)) / 2   # エルミート化
             
             #? epsの加算でフルランク化．この加算は正規化後に行う．
             # G_NFMM = G_NFMM + eps * torch.eye(G_NFMM.shape[-1], dtype=torch.complex128, device=self.device)  # エルミート化
@@ -319,13 +328,13 @@ class MNMF:
         with torch.no_grad():
             G_NFMM = torch.einsum("nfac,nfbc->nfab", torch.exp(self.gpu_L_NFMM), torch.exp(self.gpu_L_NFMM.conj())) 
             mu_NF = torch.einsum('...ii', G_NFMM).real
-            self.G_NFMM = (G_NFMM / mu_NF[:, :, None, None])
+            self.G_NFMM = G_NFMM / mu_NF[..., None, None]
         self.W_NFK = self.W_NFK * mu_NF[:, :, None]
         nu_NK = self.W_NFK.sum(axis=1)
         self.W_NFK = self.W_NFK / nu_NK[:, None]
         self.H_NKT = self.H_NKT * nu_NK[:, :, None]
-        self.lambda_NFT = self.W_NFK @ self.H_NKT + self.eps   
-        
+        self.lambda_NFT = self.W_NFK @ self.H_NKT # + self.eps   
+    
     def normalize_initial(self, G_NFMM):
         #? 計算グラフを切るかどうか
         mu_NF = torch.einsum('...ii', G_NFMM).real
@@ -427,13 +436,16 @@ class MNMF:
             coords = coords @ rotation_matrix.T
             tensor = torch.tensor(coords) + translation_torch
             
-            # 1/3ごと
-            N = tensor.shape[0]
-            part_size = N // 5
+            # # 1/3ごと
+            # N = tensor.shape[0]
+            # part_size = N // 5
+            
+            # part_sizeを数で指定
+            part_size = 10000
             part1 = tensor[:part_size]  # 最初の1/3
-            part2 = tensor[part_size:2*part_size]  
-            part3 = tensor[2*part_size:3*part_size]  
-            part4 = tensor[3*part_size:]
+            # part2 = tensor[part_size:2*part_size]  
+            # part3 = tensor[2*part_size:3*part_size]  
+            # part4 = tensor[3*part_size:]
                 
             self.ply_locs.append(part1)
         return self.ply_locs
@@ -676,29 +688,31 @@ class MNMF:
         print("start optimization")
         torch.autograd.detect_anomaly(True)
         self.L_optim = optim.Adam([self.gpu_L_NFMM], lr=lr_l)
+        # 学習率スケジューラー
+        scheduler = lr_scheduler.CosineAnnealingLR(self.L_optim, T_max=n_wh_update, eta_min=1e-6)
                 
         with tqdm(range(n_wh_update), desc='WH Updates', leave=True) as pbar_wh:
             for j in pbar_wh:
                 self.multiplicative_update_WH()
-                if not j > n_wh_update / 3:
-                    self.normalize_WH()
-                # self.normalize_WH()
+                self.normalize_WH()
                 loss = -self.log_prob_X()
                 self.loss.append(loss.item())
                 self.separated_sound_eval_SDR(mic_index=0)
+                
                 # for k in range(n_g_update):
                 #     self.update_G()
                 
                 if j > n_wh_update / 3:
                     for k in range(n_g_update):
                         self.update_G()
-                        self.normalize_WHG()
+                        scheduler.step()
+                #     self.normalize_WHG()
                 self.loss_when_wh_updated.append(self.loss[-1])
         
         self.tortal_it = len(self.loss)
         print("optimization is completed")
-        self.normalize_WHG()
-        self.params = f"lr_l={lr_l}, n_wh_update={n_wh_update}, n_source={self.n_source}, n_basis={self.n_basis}"
+        # self.normalize_WHG()
+        self.params = f"lr_l={lr_l}, n_wh_update={n_wh_update}, n_source={self.n_source}, n_basis={self.n_basis}, n_g_update={n_g_update}, n_source={self.n_source}"
 
 def plot_sdr(sdr_list):
     num_sources = len(sdr_list)
@@ -716,8 +730,7 @@ def plot_sdr(sdr_list):
 #! main
 mnmf = MNMF(x_stft, n_source=3, n_basis=16)
 mnmf.initialize(G_init_mode='GS', eta_init_mode='constant')   
-mnmf.train_only_separate(lr_l=1e-2, n_wh_update=300, n_g_update=2)
-print(f"len(loss): {len(mnmf.loss_when_wh_updated)}")
+mnmf.train_only_separate(lr_l=1e-2, n_wh_update=300, n_g_update=3)
 # mnmf.plot_ply_eta(file_name="optimized")
 plot_sdr(mnmf.sdr_list)
 mnmf.separate(mic_index=0)                                                          
