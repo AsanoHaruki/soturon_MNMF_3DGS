@@ -46,27 +46,27 @@ mic_array_geometry = np.array([  # 形状: (2, n_mics_per_array)
 
 # マイクアレイの中心位置と回転角度
 mic_array_locs = np.array([  # 形状: (I, 4)
-    [4.3, 0.3, center_z, 0],       
-    [0.1, 3.8, center_z, np.pi],   
-    [4.2, 7.5, center_z, np.pi/2], 
-    [7.8, 4.1, center_z, -np.pi/2]  # 部屋の4つ角にマイクを配置
+    [2.6, 0.3, center_z, 0],       
+    [0.3, 3.0, center_z, np.pi],   
+    [6.3, 7.5, center_z, np.pi/2], 
+    [7.8, 5.7, center_z, -np.pi/2]  # 部屋の4つ角にマイクを配置
 ]).T  # 転置して形状を (4, I) に変更
 #? mic_array_locs.shape : (4, I) マイクアレイの台数*座標とθ
 
 class array_centers():  #! マイクアレイ中心を自分で指定
     def set_array_centers(self):
         self.array_locs = np.array([
-        [4.3, 0.3],     
-        [0.1, 3.8],     
-        [4.2, 7.5],     
-        [7.8, 4.1]      
+        [2.6, 0.3],     
+        [0.3, 3.0],     
+        [6.3, 7.5],     
+        [7.8, 5.7]      
         ])
 
         self.gpu_array_locs = torch.tensor([
-        [4.3, 0.3],     
-        [0.1, 3.8],     
-        [4.2, 7.5],     
-        [7.8, 4.1]  
+        [2.6, 0.3],     
+        [0.3, 3.0],     
+        [6.3, 7.5],     
+        [7.8, 5.7]  
         ], dtype=torch.float32)  # dtypeは必要に応じてfloat64に変更可能
         
 def rotate_coordinates(xy, deg: int) -> np.ndarray:

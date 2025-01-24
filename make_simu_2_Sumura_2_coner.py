@@ -19,15 +19,15 @@ HOP_LENGTH = 160  # シフト幅（オーバラップをどれだけにするか
 F = int(N_FFT/2+1)  # 周波数ビン数
 
 # 部屋のパラメータ
-absorption = 0.9  # 吸音率
-MAX_REFLECTION_ORDER = 1    # 反射の最大回数
+absorption = 0.7  # 吸音率
+MAX_REFLECTION_ORDER = 3    # 反射の最大回数
 corners = np.array([[0, 0], [0, 8], [8, 8], [8 , 0]]).T  # [x, y] (meter)
 room_size = np.array([
     corners[0].max() - corners[0].min(),  # x方向の長さ
     corners[1].max() - corners[1].min(),  # y方向の長さ
     2.5  # z方向の高さ（extrudeで設定した値）
 ])
-room = pra.Room.from_corners(corners, materials=pra.Material(absorption), fs=SAMPLING_RATE, t0=0.0, max_order=MAX_REFLECTION_ORDER)
+room = pra.Room.from_corners(corners, materials=pra.Material(absorption), fs=SAMPLING_RATE, t0=0.0, max_order=MAX_REFLECTION_ORDER, sigma2_awgn=1e-6)
 room.extrude(room_size[2])  # 部屋の高さ
 center_x = (0 + 6) / 2  # x座標の中心
 center_y = (0 + 6) / 2  # y座標の中心

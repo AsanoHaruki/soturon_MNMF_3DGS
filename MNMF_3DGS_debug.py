@@ -23,7 +23,7 @@ from tqdm  import tqdm
 from torch.optim import lr_scheduler
 from ILRMA_D_FMM import ILRMA
 from ILRMA_Su import ILRMA_Su
-from make_simu_2_Sumura_2_coner import (
+from make_simu_single_array import (
     mic_array_locs, mic_array_geometry, SOUND_POSITIONS,
     SOUND_SPEED, n_mics_per_array, ans_R_N, gpu_ans_R_N, room_size
 )
@@ -34,6 +34,7 @@ rc('animation', html='html5')  # HTML5ビデオ用の設定
 rc('animation', writer='imagemagick', codec='gif')  # ImageMagickを指定
 
 D = 3 # ３次元で実装
+print(f"mic_locs: {mic_array_locs}")
 
 def torch_setup():
     torch.set_default_dtype(torch.float64)
@@ -97,8 +98,8 @@ print(f"x_stft.shape: {x_stft.shape}")
 
 def multi_log_prob_complex_normal(x: torch.Tensor, mu: torch.Tensor, Sigma: torch.Tensor):
     d = x.shape[-1]
-    return - 1/2 * torch.slogdet(Sigma)[1] - 1/2 * (x-mu)[..., None, :].conj() @ torch.linalg.inv(Sigma) @ (x-mu)[..., None] - d/2 * math.log(2*math.pi)
-
+    return - 1/2 * torch.slogdet(Sigma)[1] - 1/2 * (x-mu)[..., None, :].conj() @ torch.linalg.solve(Sigma, (x-mu)[..., None]) - d/2 * math.log(2*math.pi)
+    # return - 1/2 * torch.slogdet(Sigma)[1] - 1/2 * (x-mu)[..., None, :].conj() @ torch.linalg.inv(Sigma) @ (x-mu)[..., None] - d/2 * math.log(2*math.pi)
 
 def multi_log_prob_invwishart(S: torch.Tensor, nu: int, Phi: torch.Tensor):
     """
@@ -134,8 +135,8 @@ class MNMF:
             "/home/yoshiilab1/soturon/3dgs/ply_data/406ca340-e/point_cloud/iteration_30000/point_cloud.ply",
             "/home/yoshiilab1/soturon/3dgs/ply_data/2ebe532d-0/point_cloud/iteration_30000/point_cloud.ply"
         ]
-        self.true_sources = [np.array(sf.read('data/a01.wav')[0]),  # 正解データの読み込み
-                        np.array(sf.read('data/a03.wav')[0])]
+        self.true_sources = [np.array(sf.read('data/arctic_a0002.wav')[0]),  # 正解データの読み込み
+                        np.array(sf.read('data/arctic_b0540.wav')[0])]
         self.ply_translate =[(2.0, 6.0, 0.0), (6.0, 2.0, 0.0)]
         self.ply_rotation_angles = [315, 135]
 
@@ -166,7 +167,7 @@ class MNMF:
     # WHのランダム初期化
     def initialize_WH(self):
         
-        torch.manual_seed(0)    # デバッグ用にシード値を固定
+        torch.manual_seed(42)    # デバッグ用にシード値を固定、スラング
         
         W_size = [self.n_source, self.n_freq, self.n_basis]
         H_size = [self.n_source, self.n_basis, self.n_time]
@@ -291,15 +292,41 @@ class MNMF:
             G_NFMM = torch.einsum("nfac,nfbc->nfab", torch.exp(self.gpu_L_NFMM), torch.exp(self.gpu_L_NFMM.conj()))
         # print(f"G_NFMM.shape: {G_NFMM.shape}")
         # print(f"lambda_NFT.shape: {self.lambda_NFT.shape}")
-        iY_FTMM = torch.einsum('nft,nfml->ftml', self.lambda_NFT, G_NFMM).inverse()
-        Yx_FTM1 = iY_FTMM @ self.X_FTM[..., None]
-        iY_X_iY_FTMM = Yx_FTM1 @ Yx_FTM1.conj().permute(0, 1, 3, 2)
-        G_iY_X_iY_NFT = torch.einsum('nfab,ftbc->nftac',
-                                        G_NFMM,
-                                        iY_X_iY_FTMM)
+        # iY_FTMM = torch.einsum('nft,nfml->ftml', self.lambda_NFT, G_NFMM).inverse()
+        Y_FTMM = torch.einsum('nft,nfml->ftml', self.lambda_NFT, G_NFMM)
+        print(f"Y.shape: {Y_FTMM.shape}")
+        print(f"X_FTM.shape: {self.X_FTM.shape}")
+        # I_MM = torch.eye(self.n_mic)
+        # I_FTMM = torch.einsum('ft,mn->ftmn', torch.ones((self.n_freq, self.n_time),dtype=Y_FTMM.dtype, device=self.device), I_MM)
+        # iY_FTMM = torch.linalg.solve(Y_FTMM, I_FTMM)
+        # Yx_FTM1 = torch.linalg.solve(Y_FTMM, self.X_FTM[..., None])
+        # G_iY = torch.linalg.solve(G_NFMM, Y_FTMM, left=False)
+        X_iY = torch.linalg.solve(Y_FTMM, self.XX_FTMM, left=False)
+        iY_X_iY = torch.linalg.solve(Y_FTMM, X_iY)
+        # print(f"G_iY.shape: {G_iY.shape}")
+        print(f"X_iY.shape: {iY_X_iY.shape}")
+        
+        # forループでやる
+        # G_iY = torch.zeros((self.n_source, self.n_freq, self.n_time, self.n_mic, self.n_mic))
+        # with tqdm(total = self.n_source,desc="n loop") as p_bar:
+        #     for n in range(self.n_source):
+        #         for f in range(self.n_freq):
+        #             for t in range(self.n_time):
+        #                 G_iY[n,f,t] = torch.linalg.solve(Y_FTMM[f,t], G_NFMM[n,f], left=False)
+        #         p_bar.update(1)
+        # print(f"G_iY.shape: {G_iY.shape}")
+        
+        # 次元拡張してから
+        G_expanded = G_NFMM.unsqueeze(2).expand(self.n_source, self.n_freq, self.n_time, self.n_mic, self.n_mic)
+        Y_expanded = Y_FTMM.unsqueeze(0).expand(self.n_source, self.n_freq, self.n_time, self.n_mic, self.n_mic)
+        G_iY = torch.linalg.solve(Y_expanded, G_expanded, left=False)
+        
+        # Yx_FTM1 = iY_FTMM @ self.X_FTM[..., None]
+        # iY_X_iY_FTMM = Yx_FTM1 @ Yx_FTM1.conj().permute(0, 1, 3, 2)
+        G_iY_X_iY_NFT = torch.einsum('nfab,ftab->nftab', G_NFMM, iY_X_iY)
         tr_G_iY_X_iY_NFT = torch.einsum('...ii', G_iY_X_iY_NFT).real
-        G_iY_NFT = torch.einsum('nfab,ftbc->nftac',G_NFMM,iY_FTMM)
-        tr_G_iY_NFT = torch.einsum('...ii', G_iY_NFT).real
+        # G_iY_NFT = torch.einsum('nfab,ftbc->nftac',G_NFMM,iY_FTMM)
+        tr_G_iY_NFT = torch.einsum('...ii', G_iY).real
         # 乗法更新
         a_1 = (self.H_NKT.permute(0, 2, 1)[
                :, None] * tr_G_iY_X_iY_NFT[:, :, :, None]).sum(axis=2)
@@ -313,16 +340,35 @@ class MNMF:
         self.H_NKT = self.H_NKT * torch.sqrt(a_2 / b_2)
         # self.normalize_WH()
     
-    def log_prob_X(self) -> torch.Tensor:
+    def log_prob_X_beta(self) -> torch.Tensor:
         G_NFMM = torch.einsum("nfac,nfbc->nfab", torch.exp(self.gpu_L_NFMM), torch.exp(self.gpu_L_NFMM.conj())) 
         mu_NF = torch.einsum('...ii', G_NFMM).real
         G_NFMM = (G_NFMM / mu_NF[:, :, None, None])
         Y_FTMM = torch.einsum('nft,nfml->ftml', self.lambda_NFT, G_NFMM)
-        iY_FTMM = Y_FTMM.inverse()
-        iY_XX_FTMM = - torch.einsum('ftml,ftln->ftmn', iY_FTMM, self.XX_FTMM)
+        
+        # I_MM = torch.eye(self.n_mic)
+        # I_FTMM = torch.einsum('ft,mn->ftmn', torch.ones((self.n_freq, self.n_time),dtype=Y_FTMM.dtype, device=self.device), I_MM)
+        # iY_FTMM = torch.linalg.solve(Y_FTMM, I_FTMM)
+        # iY_XX_FTMM = - torch.einsum('ftml,ftln->ftmn', iY_FTMM, self.XX_FTMM)
+        
+        iY_XX_FTMM = -torch.linalg.solve(Y_FTMM, self.XX_FTMM)
+        
         tr_iY_XX_FTMM = torch.einsum('...ii', iY_XX_FTMM).real
-        lk = (tr_iY_XX_FTMM + torch.log(torch.linalg.det(iY_FTMM).real)).sum()
+        # lk = (tr_iY_XX_FTMM + torch.log(torch.linalg.det(iY_FTMM).real)).sum()
+        lk = (tr_iY_XX_FTMM - torch.log(torch.det(Y_FTMM).real)).sum()    # 逆行列の行列式は行列式の逆数
         return lk
+
+    def log_prob_X(self) -> torch.Tensor:
+        # 多変量正規分布のPDF関数を使用
+        G_NFMM = torch.einsum("nfac,nfbc->nfab", torch.exp(self.gpu_L_NFMM), torch.exp(self.gpu_L_NFMM.conj())) 
+        mu_NF = torch.einsum('...ii', G_NFMM).real
+        G_NFMM = (G_NFMM / mu_NF[:, :, None, None])
+        Y_FTMM = torch.einsum('nft,nfml->ftml', self.lambda_NFT, G_NFMM)
+        
+        log_p = 0
+        for t in range(self.n_time):
+            log_p += torch.sum(multi_log_prob_complex_normal(self.X_FTM[:,t], 0, Y_FTMM[:,t]))
+        return log_p.real
 
     def normalize_WHG(self):
         with torch.no_grad():
@@ -359,13 +405,19 @@ class MNMF:
         
     def separate(self, mic_index=0):
         G_NFMM = torch.einsum("nfac,nfbc->nfab", torch.exp(self.gpu_L_NFMM), torch.exp(self.gpu_L_NFMM.conj()))
-        Omega_NFTMM = torch.einsum('nft,nfml->nftml',
-                    self.lambda_NFT, G_NFMM)
-        Omega_sum_inv_FTMM = torch.inverse(Omega_NFTMM.sum(dim=0))
-        self.Z_FTN = torch.einsum('nftpq,ftqr,ftr->ftnp',
-                                  Omega_NFTMM,
-                                  Omega_sum_inv_FTMM,
-                                  self.X_FTM)[..., mic_index]
+        Omega_NFTMM = torch.einsum('nft,nfml->nftml', self.lambda_NFT, G_NFMM)
+        # Omega_sum_inv_FTMM = torch.inverse(Omega_NFTMM.sum(dim=0)
+        
+        Omega_sum_FTMM = Omega_NFTMM.sum(dim=0)
+        Omega_sum_NFTMM = Omega_sum_FTMM.unsqueeze(0).expand(self.n_source, -1, -1, *Omega_sum_FTMM.shape[-2:])
+        Omega_iOmega_sum = torch.linalg.solve(Omega_sum_NFTMM, Omega_NFTMM, left=False)
+        # Omega_iOmega_sum = torch.linalg.solve(Omega_sum, Omega_NFTMM, left=False)
+        self.Z_FTN = torch.einsum('nftpq,ftr->ftnp', Omega_iOmega_sum, self.X_FTM)[..., mic_index]
+        
+        # self.Z_FTN = torch.einsum('nftpq,ftqr,ftr->ftnp',
+        #                           Omega_NFTMM,
+        #                           Omega_sum_inv_FTMM,
+        #                           self.X_FTM)[..., mic_index]
         
     def calculate_l2_grid(self, room_size, grid_interval=0.1, height=1.6):
         # グリッド点の生成 (x, y 固定間隔で生成)
@@ -639,25 +691,26 @@ class MNMF:
     
     def separated_sound_eval_SDR(self, mic_index=0):
         with torch.no_grad():
-            # separate関数
+
             G_NFMM = torch.einsum("nfac,nfbc->nfab", torch.exp(self.gpu_L_NFMM), torch.exp(self.gpu_L_NFMM.conj()))
-            Omega_NFTMM = torch.einsum('nft,nfml->nftml',
-                        self.lambda_NFT, G_NFMM)
-            Omega_sum_inv_FTMM = torch.inverse(Omega_NFTMM.sum(dim=0))
-            Z_FTN = torch.einsum('nftpq,ftqr,ftr->ftnp', Omega_NFTMM, Omega_sum_inv_FTMM, self.X_FTM)[..., mic_index]
+            Omega_NFTMM = torch.einsum('nft,nfml->nftml', self.lambda_NFT, G_NFMM)
+            # Omega_sum_inv_FTMM = torch.inverse(Omega_NFTMM.sum(dim=0)
             
+            Omega_sum_FTMM = Omega_NFTMM.sum(dim=0)
+            Omega_sum_NFTMM = Omega_sum_FTMM.unsqueeze(0).expand(self.n_source, -1, -1, *Omega_sum_FTMM.shape[-2:])
+            Omega_iOmega_sum = torch.linalg.solve(Omega_sum_NFTMM, Omega_NFTMM, left=False)
+            # Omega_iOmega_sum = torch.linalg.solve(Omega_sum, Omega_NFTMM, left=False)
+            Z_FTN = torch.einsum('nftpq,ftr->ftnp', Omega_iOmega_sum, self.X_FTM)[..., mic_index]
             # パワーが大きい順に選ぶ
             separated_spec_power = torch.abs(Z_FTN).mean(axis=(0, 1))
             selected_index = torch.argsort(separated_spec_power, descending=True)[:len(self.true_sources)]
             Z_FTN = Z_FTN[:, :, selected_index]
-            
             recon_sound = stft_tool.istft(Z_FTN)
             separated_sources = [source.detach().cpu().numpy() for source in recon_sound]
             # 正規化
             self.true_sources = [source / np.linalg.norm(source) for source in self.true_sources]
             separated_sources = [source / np.linalg.norm(source) for source in separated_sources]
-            
-            # 最大長を計算
+            # パディング
             max_length = max(max([len(src) for src in self.true_sources]),
                              max([len(src) for src in separated_sources]))
             true_sources_padded = [np.pad(source, (0, max_length - len(source))) for source in self.true_sources] # パディング
@@ -730,7 +783,7 @@ def plot_sdr(sdr_list):
 #! main
 mnmf = MNMF(x_stft, n_source=3, n_basis=16)
 mnmf.initialize(G_init_mode='GS', eta_init_mode='constant')   
-mnmf.train_only_separate(lr_l=1e-2, n_wh_update=300, n_g_update=3)
+mnmf.train_only_separate(lr_l=2e-3, n_wh_update=100, n_g_update=3)
 # mnmf.plot_ply_eta(file_name="optimized")
 plot_sdr(mnmf.sdr_list)
 mnmf.separate(mic_index=0)                                                          
