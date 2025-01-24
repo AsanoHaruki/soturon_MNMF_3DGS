@@ -294,8 +294,8 @@ class MNMF:
         # print(f"lambda_NFT.shape: {self.lambda_NFT.shape}")
         # iY_FTMM = torch.einsum('nft,nfml->ftml', self.lambda_NFT, G_NFMM).inverse()
         Y_FTMM = torch.einsum('nft,nfml->ftml', self.lambda_NFT, G_NFMM)
-        print(f"Y.shape: {Y_FTMM.shape}")
-        print(f"X_FTM.shape: {self.X_FTM.shape}")
+        # print(f"Y.shape: {Y_FTMM.shape}")
+        # print(f"X_FTM.shape: {self.X_FTM.shape}")
         # I_MM = torch.eye(self.n_mic)
         # I_FTMM = torch.einsum('ft,mn->ftmn', torch.ones((self.n_freq, self.n_time),dtype=Y_FTMM.dtype, device=self.device), I_MM)
         # iY_FTMM = torch.linalg.solve(Y_FTMM, I_FTMM)
@@ -304,7 +304,7 @@ class MNMF:
         X_iY = torch.linalg.solve(Y_FTMM, self.XX_FTMM, left=False)
         iY_X_iY = torch.linalg.solve(Y_FTMM, X_iY)
         # print(f"G_iY.shape: {G_iY.shape}")
-        print(f"X_iY.shape: {iY_X_iY.shape}")
+        # print(f"X_iY.shape: {iY_X_iY.shape}")
         
         # forループでやる
         # G_iY = torch.zeros((self.n_source, self.n_freq, self.n_time, self.n_mic, self.n_mic))
@@ -380,6 +380,11 @@ class MNMF:
         self.W_NFK = self.W_NFK / nu_NK[:, None]
         self.H_NKT = self.H_NKT * nu_NK[:, :, None]
         self.lambda_NFT = self.W_NFK @ self.H_NKT # + self.eps   
+        
+        # 正規化後にコレスキー分解
+        self.gpu_L_NFMM = torch.linalg.cholesky(self.G_NFMM)
+        self.gpu_L_NFMM = torch.log(self.gpu_L_NFMM).detach()
+        self.gpu_L_NFMM.requires_grad_(True)
     
     def normalize_initial(self, G_NFMM):
         #? 計算グラフを切るかどうか
@@ -759,7 +764,7 @@ class MNMF:
                     for k in range(n_g_update):
                         self.update_G()
                         scheduler.step()
-                #     self.normalize_WHG()
+                    self.normalize_WHG()
                 self.loss_when_wh_updated.append(self.loss[-1])
         
         self.tortal_it = len(self.loss)
