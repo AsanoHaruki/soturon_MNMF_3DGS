@@ -23,9 +23,13 @@ from tqdm  import tqdm
 from torch.optim import lr_scheduler
 from ILRMA_D_FMM import ILRMA
 from ILRMA_Su import ILRMA_Su
-from make_simu_single_array import (
+# from make_simu_single_array import (
+#     mic_array_locs, mic_array_geometry, SOUND_POSITIONS,
+#     SOUND_SPEED, n_mics_per_array, ans_R_N, gpu_ans_R_N, room_size
+# )
+from make_simu_Seki import (
     mic_array_locs, mic_array_geometry, SOUND_POSITIONS,
-    SOUND_SPEED, n_mics_per_array, ans_R_N, gpu_ans_R_N, room_size
+    SOUND_SPEED, n_mics_per_array, ans_R_N, gpu_ans_R_N, ROOM_SIZE
 )
 
 import opt_einsum
@@ -80,14 +84,27 @@ class STFT:
     
 today = datetime.datetime.now()
 timestamp = today.strftime('%Y%m%d_%H%M')
-data_root = Path("self_data")
+# data_root = Path("self_data")
+data_root = Path("self_data/mixture_wav_files")
 save_root = Path(f"result/{timestamp}_only_separate")
 save_root.mkdir(exist_ok=True)
-data_file = data_root / "mixture_time_domain_2_corner.wav"
-data, samplerate = sf.read(data_file)
-print(data[28400][0])
+# data_file = data_root / "mixture_time_domain_2_corner.wav"
+
+files = sorted(data_root.glob("*.wav"))
+print(f"len_files: {len(files)}")
+data = []
+for file in files:
+    signal, samplerate = sf.read(file)
+    data.append(signal)
+    print(len(signal))
+print(len(data))
+data = np.stack(data, axis=0)
+
+# data, samplerate = sf.read(data_file)
+print(f"data.shape: {data.shape}")
 data = data - data.mean()
-data = torch.tensor(data.T)
+data = torch.tensor(data)
+print(f"data.shape: {data.shape}")
 print(f"len(data): {len(data[0])}")
 print(data[0][28400])
 stft_tool = STFT()
@@ -135,8 +152,8 @@ class MNMF:
             "/home/yoshiilab1/soturon/3dgs/ply_data/406ca340-e/point_cloud/iteration_30000/point_cloud.ply",
             "/home/yoshiilab1/soturon/3dgs/ply_data/2ebe532d-0/point_cloud/iteration_30000/point_cloud.ply"
         ]
-        self.true_sources = [np.array(sf.read('data/arctic_a0002.wav')[0]),  # 正解データの読み込み
-                        np.array(sf.read('data/arctic_b0540.wav')[0])]
+        self.true_sources = [np.array(sf.read('data/a01.wav')[0]),  # 正解データの読み込み
+                        np.array(sf.read('data/a02.wav')[0])]
         self.ply_translate =[(2.0, 6.0, 0.0), (6.0, 2.0, 0.0)]
         self.ply_rotation_angles = [315, 135]
 
@@ -686,9 +703,9 @@ class MNMF:
             ax.set_zlabel("Z")
             ax.set_title("3D Point Cloud Visualization with Eta")
             ax.legend()
-            ax.set_xlim(0, room_size[0])
-            ax.set_ylim(0, room_size[1])
-            ax.set_zlim(0, room_size[3])
+            ax.set_xlim(0, ROOM_SIZE[0])
+            ax.set_ylim(0, ROOM_SIZE[1])
+            ax.set_zlim(0, ROOM_SIZE[3])
             ax.view_init(elev=elev, azim=azim)
             file_path = save_root / f"{file_name}_eta_map_view{i+1}.png"
             plt.savefig(file_path, dpi=300, bbox_inches="tight")
@@ -786,9 +803,9 @@ def plot_sdr(sdr_list):
     plt.show()
 
 #! main
-mnmf = MNMF(x_stft, n_source=3, n_basis=16)
+mnmf = MNMF(x_stft, n_source=2, n_basis=16)
 mnmf.initialize(G_init_mode='GS', eta_init_mode='constant')   
-mnmf.train_only_separate(lr_l=2e-3, n_wh_update=100, n_g_update=3)
+mnmf.train_only_separate(lr_l=1e-2, n_wh_update=100, n_g_update=3)
 # mnmf.plot_ply_eta(file_name="optimized")
 plot_sdr(mnmf.sdr_list)
 mnmf.separate(mic_index=0)                                                          

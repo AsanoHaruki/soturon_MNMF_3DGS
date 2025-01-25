@@ -33,7 +33,7 @@ center_x = (0 + 6) / 2  # x座標の中心
 center_y = (0 + 6) / 2  # y座標の中心
 # マイクアレイのパラメータ
 n_mics_per_array = 6  # 各マイクアレイのチャンネル数
-radius = 0.1          # マイクアレイの半径（メートル）
+radius = 0.5          # マイクアレイの半径（メートル）
 center_z = 1.5        # マイクの高さ（人の耳の高さ）
 
 # マイクアレイの幾何学 (2D座標系での半径方向の配置)
@@ -95,7 +95,7 @@ MIC_POSITIONS = get_whole_3D_mic_locs(mic_array_locs, mic_array_geometry)  # 形
 mic_array = pra.MicrophoneArray(MIC_POSITIONS, room.fs)
 room.add_microphone_array(mic_array)
 
-# room.plot()
+room.plot()
 
 # 音源設定
 SOUND_POSITIONS = np.array([
@@ -154,7 +154,7 @@ plt.axhline(y=center_y, color='gray', linestyle='--', linewidth=0.8)  # 中心�
 plt.grid()  # グリッドを表示
 plt.legend()  # 凡例を表示
 
-# plt.show()  # 2Dプロット
+plt.show()  # 2Dプロット
 
 N = len(files)
 # 生成した音声の可視化・確認
@@ -245,7 +245,8 @@ for signals in all_source_signals:
 noisy_signals = np.array(noisy_signals)
 print(noisy_signals.shape)
 
-mixture_signal_MT = np.sum(noisy_signals, axis=0)  # (M,T)
+# mixture_signal_MT = np.sum(noisy_signals, axis=0)  # (M,T)
+mixture_signal_MT = np.sum(signals, axis=0)  # (M,T)
 print(f"mixture: {mixture_signal_MT.shape}")
 mixture_signal_MT /= np.abs(mixture_signal_MT).max() * 1.2
 
