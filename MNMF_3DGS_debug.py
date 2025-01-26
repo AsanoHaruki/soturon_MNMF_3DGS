@@ -290,6 +290,9 @@ class MNMF:
                             recon_sound[i, :], samplerate),
             print(G_NFMM)
             torch.clear_autocast_cache()
+            
+        elif init_mode == 'identity':
+            pass
         
         self.gpu_L_NFMM = torch.linalg.cholesky(G_NFMM) # エルミート行列である必要
         self.gpu_L_NFMM = torch.log(self.gpu_L_NFMM).detach()
@@ -774,14 +777,16 @@ class MNMF:
                 self.loss.append(loss.item())
                 self.separated_sound_eval_SDR(mic_index=0)
                 
-                # for k in range(n_g_update):
-                #     self.update_G()
+                for k in range(n_g_update):
+                    self.update_G()
+                    scheduler.step()
+                self.normalize_WHG()
                 
-                if j > n_wh_update / 3:
-                    for k in range(n_g_update):
-                        self.update_G()
-                        scheduler.step()
-                    self.normalize_WHG()
+                # if j > n_wh_update / 3:
+                #     for k in range(n_g_update):
+                #         self.update_G()
+                #         scheduler.step()
+                #     self.normalize_WHG()
                 self.loss_when_wh_updated.append(self.loss[-1])
         
         self.tortal_it = len(self.loss)
@@ -804,7 +809,7 @@ def plot_sdr(sdr_list):
 
 #! main
 mnmf = MNMF(x_stft, n_source=2, n_basis=16)
-mnmf.initialize(G_init_mode='GS', eta_init_mode='constant')   
+mnmf.initialize(G_init_mode='identity', eta_init_mode='constant')   
 mnmf.train_only_separate(lr_l=1e-2, n_wh_update=100, n_g_update=3)
 # mnmf.plot_ply_eta(file_name="optimized")
 plot_sdr(mnmf.sdr_list)

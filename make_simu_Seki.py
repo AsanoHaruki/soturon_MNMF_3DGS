@@ -52,17 +52,17 @@ mic_array_geometry = np.array([  # 形状: (2, n_mics_per_array)
 ])
 # マイクアレイの中心位置と回転角度
 mic_array_locs = np.array([  # 形状: (I, 4)
-    [2.0, 2.0, center_z, 0], 
+    [4.0, 4.0, center_z, 0], 
 ]).T
 
 class array_centers(): #! マイクアレイの位置
     def set_array_centers(self):
         self.array_locs = np.array([
-        [2.0, 2.0],         
+        [4.0, 4.0],         
         ])
 
         self.gpu_array_locs = torch.tensor([
-        [2.0, 2.0],     
+        [4.0, 4.0],     
         ], dtype=torch.float64)
 
 MIC_POSITIONS = get_whole_3D_mic_locs(mic_array_locs, mic_array_geometry)
